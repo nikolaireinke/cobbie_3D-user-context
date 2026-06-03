@@ -42,7 +42,7 @@ from contextlib import suppress
 
 import mlflow
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
 from src.agents.cobbie import cobbie
 from src.config import TEST_IFC_PATH, DIRECTORY_IFC_MODELS_PATH
@@ -104,6 +104,41 @@ async def list_models():
             for m in models
         ]
     }
+
+
+@app.get("/elements")
+async def list_elements(
+    model_id: int | None = None,
+    model_path: str | None = None,
+    ifc_class: str = "IfcElement",
+    limit: int = 1000,
+):
+    """List elements (GlobalId, class, name) of a model so a client can offer a
+    selection picker with IDs that model.by_guid() is guaranteed to resolve."""
+    try:
+        path = resolve_model(model_id, model_path)
+    except ModelResolutionError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    def work():
+        # Touch the (possibly shared) cached file under the agent lock.
+        with _AGENT_LOCK:
+            if STATE.cache_models:
+                model = get_cached_ifc(path)
+            else:
+                import ifcopenshell
+                model = ifcopenshell.open(path)
+            try:
+                elems = model.by_type(ifc_class)  # includes subclasses
+            except RuntimeError as e:
+                raise HTTPException(status_code=400, detail=f"Bad ifc_class: {e}")
+            return [
+                {"guid": e.GlobalId, "ifc_class": e.is_a(), "name": getattr(e, "Name", None)}
+                for e in elems[: max(0, limit)]
+            ]
+
+    elements = await asyncio.to_thread(work)
+    return {"model": path, "count": len(elements), "elements": elements}
 
 
 # --------------------------------------------------------------------------
