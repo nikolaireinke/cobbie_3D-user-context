@@ -10,6 +10,16 @@ from src.util.baml_retry import call_baml_with_retry
 from src.util.python_executor import execute_python
 
 
+def _safe_emit(on_event: Optional[Callable], event: dict) -> None:
+    """Fire a streaming callback without ever letting it break the agent loop."""
+    if on_event is None:
+        return
+    try:
+        on_event(event)
+    except Exception:
+        pass
+
+
 def _execute_code_action(
     code_action: CodeAction,
     iteration: int,
@@ -17,6 +27,7 @@ def _execute_code_action(
     model_path: Optional[str] = None,
     add_code_prefix: bool = True,
     interpreter: Optional[Any] = None,
+    on_event: Optional[Callable] = None,
 ) -> str:
     """
     Execute a CodeAction from the agent return the the formated result of the attempt.
@@ -43,6 +54,14 @@ def _execute_code_action(
             }
         )
 
+        # Stream the agent's intent before running it.
+        _safe_emit(on_event, {
+            "type": "iteration",
+            "iteration": iteration + 1,
+            "thoughts": code_action.thoughts,
+            "code": code_action.python_code,
+        })
+
         # Execute the code
         result_code_evaluation = execute_python(
             python_code=python_code,
@@ -50,6 +69,13 @@ def _execute_code_action(
             model_path=model_path,
             interpreter=interpreter,
         )
+
+        # Stream the execution result.
+        _safe_emit(on_event, {
+            "type": "observation",
+            "iteration": iteration + 1,
+            "result": result_code_evaluation,
+        })
 
         # Update the previous attempt
         attempt = f"""

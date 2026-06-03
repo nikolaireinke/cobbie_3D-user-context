@@ -5,7 +5,7 @@ Functional implementation using the BAML library and the CodeAct architecture.
 
 import time
 from contextlib import nullcontext
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import mlflow
 from baml_py import baml_py
@@ -20,6 +20,41 @@ from src.util.generate_tools_docs import generate_tools_docs
 from src.util.python_executor import setup_interpreter
 
 
+def _compose_briefing(
+    question: str,
+    user_context: Optional[Dict] = None,
+    ifc_model: Optional[Any] = None,
+) -> str:
+    """Tell the LLM about runtime objects injected into its namespace. Returns
+    the question unchanged when there's nothing to brief (i.e. the eval path)."""
+    lines = []
+    if ifc_model is not None:
+        lines.append(
+            "An opened IFC model is already in your namespace as `model` "
+            "(an ifcopenshell.file). Use it directly; do NOT call ifcopenshell.open()."
+        )
+    if user_context:
+        sel = user_context.get("selection") or []
+        view = user_context.get("objects_in_view") or []
+        pose = user_context.get("user_pose") or {}
+        lines.append(
+            "Live context from the 3D viewer is available as variables: `selection` "
+            "(list of IFC GlobalId strings the user selected), `objects_in_view` (list "
+            "of dicts for objects in the view cone), `user_pose` (dict: user position/"
+            "orientation in IFC coordinates), and the full `user_context` dict. Resolve "
+            "a GlobalId to an entity with model.by_guid(<id>). Use these to answer "
+            "deictic references like 'this', 'the selection', or 'what I'm looking at'."
+        )
+        lines.append(
+            f"Right now: selection={len(sel)} element(s), objects_in_view={len(view)}, "
+            f"user_pose keys={sorted(pose.keys()) if isinstance(pose, dict) else 'n/a'}."
+        )
+    if not lines:
+        return question
+    briefing = "RUNTIME CONTEXT:\n" + "\n".join(f"- {ln}" for ln in lines)
+    return f"{briefing}\n\nQUESTION:\n{question}"
+
+
 def _cobbie(
     question: str,
     tools: Dict[str, Callable],
@@ -27,6 +62,9 @@ def _cobbie(
     model_path: Optional[str] = None,
     add_code_prefix: bool = False,
     client: str = "GLM_4_7",
+    user_context: Optional[Dict] = None,
+    ifc_model: Optional[Any] = None,
+    on_event: Optional[Callable] = None,
     **kwargs,
 ) -> Tuple[FinalAnswer | AgentError, str, str | None]:
     """
@@ -69,7 +107,12 @@ def _cobbie(
     rendered_prompt: str | None = None
 
     # Create interpreter ONCE for this question (reused across all iterations)
-    interpreter = setup_interpreter(model_path, tools)
+    interpreter = setup_interpreter(
+        model_path, tools, ifc_model=ifc_model, user_context=user_context
+    )
+
+    # Prepend a runtime-context briefing for the LLM (no-op on the eval path).
+    effective_question = _compose_briefing(question, user_context, ifc_model)
 
     # Main reasoning loop
     for iteration in range(max_iterations):
@@ -98,7 +141,7 @@ def _cobbie(
                 )
 
                 result = _code_act_iter(
-                    user_input=question,
+                    user_input=effective_question,
                     available_tools=tools_docs,
                     previous_attempts=previous_attempts,
                     model_path=model_path,
@@ -255,6 +298,7 @@ Please retry with the correct format.
                     model_path=model_path,
                     add_code_prefix=add_code_prefix,
                     interpreter=interpreter,
+                    on_event=on_event,
                 )
                 previous_attempts += f"/n{current_attempt}/n"
 
@@ -353,6 +397,9 @@ def cobbie(
     add_code_prefix: bool = False,
     client: str = "GLM_4_7",
     mlflow_run_id: Optional[str] = None,
+    user_context: Optional[Dict] = None,
+    ifc_model: Optional[Any] = None,
+    on_event: Optional[Callable] = None,
     **kwargs,
 ) -> CobbiResult:
     """
@@ -432,6 +479,9 @@ def cobbie(
                 model_path=model_path,
                 add_code_prefix=add_code_prefix,
                 client=client,
+                user_context=user_context,
+                ifc_model=ifc_model,
+                on_event=on_event,
                 **kwargs,
             )
             execution_time = time.time() - start_time
