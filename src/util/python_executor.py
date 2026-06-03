@@ -64,7 +64,9 @@ def truncate_to_tokens(text: str, max_tokens: int, model: str = "gpt-3.5-turbo")
 
 def setup_interpreter(
     model_path: Optional[str] = None,
-    tools: Optional[Dict[str, Callable]] = None
+    tools: Optional[Dict[str, Callable]] = None,
+    ifc_model: Optional[Any] = None,
+    user_context: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """
     Setup Python interpreter with tools and model context.
@@ -89,6 +91,19 @@ def setup_interpreter(
         # Add tools to interpreter namespace
         if tools:
             interpreter_globals.update(tools)
+
+        # Inject a pre-opened IFC model so iterations don't re-open the file.
+        # Only when provided -> the eval path (no ifc_model) is unchanged.
+        if ifc_model is not None:
+            interpreter_globals['model'] = ifc_model
+
+        # Inject live viewer context as ready-to-use Python objects (no code-gen,
+        # so GlobalId strings can never inject code).
+        if user_context:
+            interpreter_globals['user_context'] = user_context
+            interpreter_globals['selection'] = user_context.get('selection', [])
+            interpreter_globals['objects_in_view'] = user_context.get('objects_in_view', [])
+            interpreter_globals['user_pose'] = user_context.get('user_pose', {})
 
         # Create interpreter
         interpreter = InteractiveInterpreter(interpreter_globals)
