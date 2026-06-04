@@ -18,7 +18,7 @@ function Cobbie(
 
   ## EXECUTION ENVIRONMENT
   Your code runs in a persistent Python session. Variables, imports, loaded models, and computed results from previous iterations are still available — reuse them instead of recomputing.
-  Note: only stdout and stderr are visible in the execution results.
+  Note: only stdout and stderr are visible in the execution results, and that output is capped (~2048 tokens) — anything beyond is truncated. Print only the targeted fields you need, not whole entities or `dir()` dumps, or you may lose the very data you were after and have to re-run.
 
   {{ _.role("user") }}
   Question: {{ user_input }}
@@ -29,7 +29,7 @@ function Cobbie(
   {{ available_tools }}
 
   {% if "query_ifcopenshell_docs" in available_tools %}
-  NOTE: You do NOT know the ifcopenshell API. ALWAYS use `query_ifcopenshell_docs` before writing code that calls ifcopenshell methods directly. You may query docs and execute code in the same iteration.
+  NOTE: When you are unsure of the correct ifcopenshell API for a non-trivial operation, use `query_ifcopenshell_docs` to look it up. You do NOT need it for basic calls you already know (e.g. `by_type`, `by_guid`, `is_a()`, attribute access) — querying for those just wastes an iteration. When you do need it, query the docs and run the dependent code in the same iteration rather than as a separate step.
   {% endif %}
   {% if previous_attempts %}
 
@@ -41,8 +41,9 @@ function Cobbie(
   ## EXPLORATION APPROACH
 
   - Prefer helper functions over direct ifcopenshell calls whenever possible.
-  {% if "query_ifcopenshell_docs" in available_tools %}- Before using ifcopenshell directly, ALWAYS query_ifcopenshell_docs first (see tool above).{% endif %}
-  - Thoroughly explore the BIM model before answering: check all relevant element types, properties, Psets, and ePsets as needed for the question.
+  {% if "query_ifcopenshell_docs" in available_tools %}- For ifcopenshell APIs you are unsure about, query_ifcopenshell_docs first (see tool above); skip it for basic, well-known calls.{% endif %}
+  - Be efficient: each code block is a slow round-trip. In a SINGLE code block, gather everything the question is likely to need (type, name, properties, Psets, materials, relationships as relevant) instead of probing one fact at a time across multiple iterations.
+  - Explore only what the question requires. Do NOT run extra confirmatory or enrichment code for facts you have already observed.
   - Pay careful attention to the specific element types, properties, and scope requested in the question.
 
   ## RESPONSE QUALITY CRITERIA
@@ -86,7 +87,7 @@ function Cobbie(
   - For enumerable questions (e.g., "which rooms..."), list ALL items, not a subset
   - For multi-part questions, address every part
   - For open-ended questions (e.g., "describe..."), provide reasonable detail level
-  - If you discover the answer is incomplete, continue exploration before responding
+  - Continue exploration only if a part the question explicitly asks for is still unanswered — not to confirm or enrich what you have already observed.
 
   ### 3. TRANSPARENCY - Cite Every Claim
 
@@ -135,6 +136,10 @@ function Cobbie(
 
   ### BOUNDED EXIT — do not loop forever and do not fabricate:
   - You have a limited number of iterations. If part of the question resists after a few genuine attempts (e.g. a computation keeps erroring), choose FinalAnswer that answers the parts you DID verify and explicitly states which part you could not determine and why (cite the error). A correct partial answer with a stated gap is better than a fabricated complete answer or exhausting your iterations.
+
+  ### BE DECISIVE — minimize iterations (each one is a slow round-trip):
+  - Choose FinalAnswer as soon as the observed results already answer the question accurately and can be fully grounded (per the GROUNDING GATE). Do NOT spend an extra iteration to re-verify, confirm, or enrich an answer you can already give — answering now is preferred over gathering nice-to-have detail.
+  - When exploration is still needed, front-load it into one comprehensive code block (see EXPLORATION APPROACH) so you can answer on the very next turn.
 
   {{ ctx.output_format }}
   {# Haiku ignores the schema and emits native tool-call XML; prefilling the
@@ -222,4 +227,3 @@ test mini_cobbie_ollama {
     user_input "what is the gross floor area of the building?"
   }
 }
-
