@@ -8,6 +8,9 @@
 #     is ready (tools loaded, imports done). The launcher reads that line.
 #   - GET  /health  -> 200 once serving (used by the Remote provider).
 #   - GET  /models  -> catalogue of registered IFC models (for a client-side picker).
+#   - GET  /model-gltf?model_id=<int> -> stream that model's .glb (nodes named by
+#                       IFC GlobalId). Requires the glb to have been generated
+#                       (server --create-gltf, or `python -m src.gltf.convert`).
 #   - WS   /ws       -> query channel (see protocol below).
 #
 # WebSocket protocol (v2):
@@ -45,10 +48,12 @@ from typing import Any
 import mlflow
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
 from src.agents.cobbie import cobbie
 from src.config import TEST_IFC_PATH, DIRECTORY_IFC_MODELS_PATH
 from src.db.query import get_ifc_model, get_ifc_models
+from src.gltf.convert import build_all, glb_path_for
 from src.util.get_tools import get_tools
 
 # --------------------------------------------------------------------------
@@ -217,6 +222,23 @@ async def list_elements(
     return {"model": path, "count": len(elements), "elements": elements}
 
 
+@app.get("/model-gltf")
+async def model_gltf(model_id: int):
+    """Stream a model's generated .glb (glTF nodes are named by IFC GlobalId).
+
+    The client selects a registered model via /models, then fetches its geometry
+    here with the same model_id it sends on queries."""
+    try:
+        glb_path = resolve_glb(model_id)
+    except ModelResolutionError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return FileResponse(
+        glb_path,
+        media_type="model/gltf-binary",
+        filename=os.path.basename(glb_path),
+    )
+
+
 # --------------------------------------------------------------------------
 # Model resolution.
 # --------------------------------------------------------------------------
@@ -264,6 +286,28 @@ def resolve_model(model_id, model_path) -> str:
         return _validate_ifc(model_path)
 
     return _validate_ifc(STATE.default_model_path)
+
+
+def resolve_glb(model_id) -> str:
+    """Resolve a registered model_id to its generated .glb path on this machine.
+
+    Keyed off the same project/model_name as resolve_model so the glb mirrors the
+    IFC selection. Raises ModelResolutionError if unregistered or not yet generated.
+    """
+    if model_id is None:
+        raise ModelResolutionError("model_id is required for /model-gltf", "BadRequest")
+    rec = get_ifc_model(int(model_id))
+    if rec is None:
+        raise ModelResolutionError(f"No model registered with id={model_id}", "ModelNotFound")
+
+    glb_path = glb_path_for(rec.project_name, rec.model_name)
+    if not os.path.isfile(glb_path):
+        raise ModelResolutionError(
+            f"glTF for id={model_id} ({rec.project_name}/{rec.model_name}) not generated. "
+            f"Run the server with --create-gltf (or `python -m src.gltf.convert`).",
+            "GltfNotGenerated",
+        )
+    return glb_path
 
 
 # --------------------------------------------------------------------------
@@ -488,6 +532,8 @@ def main():
                         help="Disable per-query transcript files")
     parser.add_argument("--mlflow-dir", default=None,
                         help="Local MLflow file store (default: <root>/mlruns)")
+    parser.add_argument("--create-gltf", action="store_true",
+                        help="Convert registered IFC models to .glb (incremental) before serving")
     args = parser.parse_args()
 
     # Force a local, server-less MLflow store so agent runs never hang trying to
@@ -505,6 +551,13 @@ def main():
     STATE.cache_models = not args.no_cache_models
     STATE.log_dir = None if args.no_query_logs else (args.log_dir or os.path.join(root, "query_logs"))
     print(f"[server] loaded {len(STATE.tools)} tools; model={args.model}", file=sys.stderr, flush=True)
+
+    # Incrementally (re)generate model geometry before going live. Up-to-date glbs
+    # are skipped via a fast mtime check; only changed/new models reconvert.
+    if args.create_gltf:
+        print("[server] --create-gltf: checking model geometry...", file=sys.stderr, flush=True)
+        summary = build_all()
+        print(f"[server] glTF: {summary}", file=sys.stderr, flush=True)
 
     if args.parent_pid:
         start_parent_watchdog(args.parent_pid)
