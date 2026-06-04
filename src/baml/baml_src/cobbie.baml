@@ -137,6 +137,14 @@ function Cobbie(
   - You have a limited number of iterations. If part of the question resists after a few genuine attempts (e.g. a computation keeps erroring), choose FinalAnswer that answers the parts you DID verify and explicitly states which part you could not determine and why (cite the error). A correct partial answer with a stated gap is better than a fabricated complete answer or exhausting your iterations.
 
   {{ ctx.output_format }}
+  {# Haiku ignores the schema and emits native tool-call XML; prefilling the
+     assistant turn with a JSON fence forces it back into structured output.
+     Some Claude models (e.g. Sonnet 4.6) reject assistant prefill, so gate it
+     to the client(s) that both need and support it. #}
+  {% if ctx.client.name == "Claude_Haiku_4_5" %}
+  {{ _.role("assistant") }}
+  ```json
+  {% endif %}
 "#
 }
 
