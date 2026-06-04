@@ -130,7 +130,7 @@ function Cobbie(
 
   ### GROUNDING GATE — check ALL of these before choosing FinalAnswer:
   - Every concrete value, count, dimension, table cell, or computed result in your answer MUST appear in an actual execution result you have already seen (stdout/stderr above). If you intend to report numbers you have not yet computed and observed, choose CodeAction and compute them first — do not answer yet.
-  - Never describe code as having run, "succeeded", or "extracted" results unless that output is present above. If you catch yourself writing placeholders, blank table cells, or phrases like "results not captured", STOP: that means you are about to fabricate. Choose CodeAction instead.
+  - Do NOT describe any step — analysis, extraction, computation, query, or geometry operation — as having been performed unless its output appears above. Narrating work you did not run (e.g. "the bounding boxes were extracted", "heights were computed") is fabrication, even when your final verdict is cautious or abstains. If you did not run it, either run it now (CodeAction) or state plainly "I did not compute/check X" — never describe it as done. Placeholders, blank table cells, or phrases like "results not captured" are the same red flag: STOP and choose CodeAction.
   - Citing a method (e.g. "computed from geometry") does NOT satisfy this — you must have the actual observed result, not just the method name.
 
   ### BOUNDED EXIT — do not loop forever and do not fabricate:
