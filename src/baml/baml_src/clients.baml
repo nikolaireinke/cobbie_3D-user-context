@@ -124,6 +124,22 @@ client<llm> Claude_Sonnet_4_6 {
   }
 }
 
+// Anthropic Claude Haiku 4.5 (fast, low-cost variant)
+client<llm> Claude_Haiku_4_5 {
+  provider anthropic
+  retry_policy Exponential
+  options {
+    model "claude-haiku-4-5"
+    api_key env.ANTHROPIC_API_KEY
+    max_tokens 8192
+    temperature 0.1
+    http {
+      connect_timeout_ms 30000
+      request_timeout_ms 180000
+    }
+  }
+}
+
 // https://docs.boundaryml.com/docs/snippets/clients/retry
 retry_policy Constant {
   max_retries 0
