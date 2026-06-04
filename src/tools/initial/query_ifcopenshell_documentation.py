@@ -63,11 +63,37 @@ def _query_context7(query: str) -> str:
         return f"Failed to query Context7 API: {str(e)}"
 
 
-def _query_custom(query: str) -> str:
-    """Query IfcOpenShell docs using local vector store."""
-    from src.docs_indexer.retriever import query_docs
+_DOCS_UNAVAILABLE_HINT = (
+    " Proceed using your own ifcopenshell knowledge and verify the result in code."
+)
 
-    return query_docs(query, top_k=5)
+
+def _query_custom(query: str) -> str:
+    """Query IfcOpenShell docs using the local vector store.
+
+    Degrades gracefully: the local backend depends on an embedding model and a
+    pre-built vector index, neither of which is guaranteed to exist on a given
+    machine. On any failure (embedding model not pulled, index empty/absent,
+    etc.) we return a clear message instead of raising, so a failed lookup
+    never aborts the agent's iteration.
+    """
+    try:
+        from src.docs_indexer.retriever import query_docs
+
+        result = query_docs(query, top_k=5)
+    except Exception as e:
+        return (
+            f"IfcOpenShell documentation is currently unavailable ({type(e).__name__}: {e})."
+            + _DOCS_UNAVAILABLE_HINT
+        )
+
+    if not result.strip() or result.strip() == "No relevant documentation found.":
+        return (
+            "No IfcOpenShell documentation matched this query "
+            "(the local docs index may be empty)."
+            + _DOCS_UNAVAILABLE_HINT
+        )
+    return result
 
 
 def query_ifcopenshell_docs(query: str) -> None:
