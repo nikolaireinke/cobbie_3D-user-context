@@ -57,7 +57,7 @@ from src.util.get_tools import get_tools
 class ServerState:
     tools: dict = {}
     default_model_path: str = TEST_IFC_PATH
-    client: str = "GLM_4_7"
+    client: str = "Claude_Sonnet_4_6"
     max_iterations: int = 15
     add_code_prefix: bool = True  # binds path_ifc_model in the per-iteration prefix
     cache_models: bool = True     # keep opened ifcopenshell.file objects across queries
@@ -341,7 +341,7 @@ def main():
                         help="0 = OS-chosen free port (printed in the READY line)")
     parser.add_argument("--model", default=TEST_IFC_PATH,
                         help="Absolute path to the IFC file the viewer has loaded")
-    parser.add_argument("--client", default="GLM_4_7", help="BAML primary client")
+    parser.add_argument("--client", default="Claude_Sonnet_4_6", help="BAML primary client")
     parser.add_argument("--tools", nargs="+", default=["initial"],
                         choices=["initial", "created", "manual"])
     parser.add_argument("--max-iterations", type=int, default=15)
