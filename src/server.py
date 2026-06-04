@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 from contextlib import suppress
+from typing import Any
 
 import mlflow
 import uvicorn
@@ -123,11 +124,37 @@ def log_event(f, ev: dict):
         return
     t = ev.get("type")
     if t == "iteration":
-        f.write(f"\n----- ITERATION {ev.get('iteration')} -----\n")
+        ll = ev.get("llm_seconds")
+        header = f"\n----- ITERATION {ev.get('iteration')} -----"
+        if ll is not None:
+            header += f"  (llm {round(ll, 3)}s)"
+        f.write(header + "\n")
         f.write(f"[thoughts]\n{ev.get('thoughts', '')}\n\n")
         f.write(f"[code]\n{ev.get('code', '')}\n")
     elif t == "observation":
-        f.write(f"\n[result of iteration {ev.get('iteration')}]\n{ev.get('result', '')}\n")
+        ex = ev.get("exec_seconds")
+        suffix = f"  (exec {ex}s)" if ex is not None else ""
+        f.write(f"\n[result of iteration {ev.get('iteration')}]{suffix}\n{ev.get('result', '')}\n")
+    # "timing" events are folded into the end-of-query TIMING SUMMARY block.
+    f.flush()
+
+
+def write_timing_summary(f, t: dict):
+    """Write the end-of-query timing breakdown to the transcript."""
+    if f is None:
+        return
+    f.write("\n" + "-" * 80 + "\n")
+    f.write("TIMING SUMMARY (seconds)\n")
+    f.write(f"  total               : {t['total_s']}\n")
+    f.write(f"  time to first token : {t['time_to_first_token_s']}\n")
+    f.write(f"  model load          : {t['model_load_s']}\n")
+    f.write(f"  LLM (all calls)     : {t['llm_s']}\n")
+    f.write(f"  code execution      : {t['exec_s']}\n")
+    f.write(f"  residual / overhead : {t['residual_s']}\n")
+    f.write(
+        f"  iterations={t['iterations']} llm_calls={t['llm_calls']} "
+        f"code_executions={t['code_executions']}\n"
+    )
     f.flush()
 app = FastAPI(title="cobbie-bridge")
 
@@ -249,11 +276,15 @@ def run_cobbie_blocking(
     context: dict | None,
     model_path: str,
     on_event=None,
-) -> dict:
+) -> dict[str, Any]:
     # Serialize agent runs while caching (shared ifcopenshell.file isn't
     # concurrency-safe). With caching off, runs are independent.
     with _AGENT_LOCK:
+        # Time the (possibly cold) IFC open so the transcript can separate model
+        # load from reasoning. Cached hits are ~0; first open can be seconds.
+        _load_start = time.time()
         ifc_model = get_cached_ifc(model_path) if STATE.cache_models else None
+        model_load_s = round(time.time() - _load_start, 3)
         result = cobbie(
             user_input=question,
             tools=STATE.tools,
@@ -271,10 +302,16 @@ def run_cobbie_blocking(
             "type": "error",
             "error": getattr(result.error, "error_message", str(result.error)),
             "error_type": getattr(result.error, "error_type", "AgentError"),
+            "model_load_s": model_load_s,
         }
 
     if result.answer is None:
-        return {"type": "error", "error": "No answer produced.", "error_type": "EmptyResult"}
+        return {
+            "type": "error",
+            "error": "No answer produced.",
+            "error_type": "EmptyResult",
+            "model_load_s": model_load_s,
+        }
 
     answer_text = result.answer.answer or ""
     return {
@@ -282,6 +319,7 @@ def run_cobbie_blocking(
         "answer": answer_text,
         "reasoning": result.answer.thoughts or "",
         "success": "iteration limit" not in answer_text.lower(),
+        "model_load_s": model_load_s,
     }
 
 
@@ -317,6 +355,8 @@ async def ws_endpoint(ws: WebSocket):
                 await ws.send_json({"type": "error", "error": str(e), "error_type": e.error_type})
                 continue
 
+            # Start the wall-clock for this query (covers model load + reasoning).
+            t_start = time.time()
             await ws.send_json({"type": "status", "stage": "running", "model": model_path})
 
             # Full per-query transcript (untruncated), for inspecting code/results.
@@ -328,7 +368,17 @@ async def ws_endpoint(ws: WebSocket):
             loop = asyncio.get_running_loop()
             event_q: asyncio.Queue = asyncio.Queue()
 
+            # Timing captured from the event stream: time-to-first-token (first
+            # iteration the user sees) and the agent's authoritative totals.
+            ttft_holder: dict = {"t": None}
+            agent_timing: dict = {}
+
             def on_event(ev, _loop=loop, _q=event_q, _f=log_f):
+                etype = ev.get("type")
+                if etype == "iteration" and ttft_holder["t"] is None:
+                    ttft_holder["t"] = time.time() - t_start
+                elif etype == "timing":
+                    agent_timing.update(ev)
                 log_event(_f, ev)                       # full transcript (worker thread)
                 _loop.call_soon_threadsafe(_q.put_nowait, ev)  # stream to socket
 
@@ -340,6 +390,7 @@ async def ws_endpoint(ws: WebSocket):
                     await ws.send_json(ev)
 
             drain_task = asyncio.create_task(drain())
+            payload: dict[str, Any]
             try:
                 payload = await asyncio.to_thread(
                     run_cobbie_blocking, question, context, model_path, on_event
@@ -350,7 +401,31 @@ async def ws_endpoint(ws: WebSocket):
                 event_q.put_nowait(None)  # stop the drain task
                 await drain_task
 
+            # Compose the timing breakdown: agent totals (llm/exec) plus the
+            # numbers only the server sees (model load, total wall-clock, ttft).
+            # residual surfaces unaccounted time (interpreter setup, tools docs,
+            # span + serialization overhead, thread handoff) so the buckets stay
+            # honest — a large residual is itself an optimization target.
+            total_s = time.time() - t_start
+            model_load_s = float(payload.pop("model_load_s", 0.0) or 0.0)
+            llm_s = float(agent_timing.get("llm_s", 0.0) or 0.0)
+            exec_s = float(agent_timing.get("exec_s", 0.0) or 0.0)
+            ttft_s = ttft_holder["t"] if ttft_holder["t"] is not None else total_s
+            timing = {
+                "total_s": round(total_s, 3),
+                "time_to_first_token_s": round(ttft_s, 3),
+                "model_load_s": round(model_load_s, 3),
+                "llm_s": round(llm_s, 3),
+                "exec_s": round(exec_s, 3),
+                "residual_s": round(total_s - model_load_s - llm_s - exec_s, 3),
+                "iterations": agent_timing.get("iterations"),
+                "llm_calls": agent_timing.get("llm_calls"),
+                "code_executions": agent_timing.get("code_executions"),
+            }
+            payload["timing"] = timing
+
             if log_f is not None:
+                write_timing_summary(log_f, timing)
                 log_f.write("\n" + "=" * 80 + "\n")
                 log_f.write(f"[{payload.get('type')}]\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n")
                 log_f.close()

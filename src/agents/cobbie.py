@@ -14,7 +14,7 @@ from loguru import logger
 
 from src.baml.baml_client.types import CodeAction, FinalAnswer
 from src.schemas.agent_error import AgentError, CobbiResult
-from src.util.code_act_inner_loop import _code_act_iter, _execute_code_action
+from src.util.code_act_inner_loop import _code_act_iter, _execute_code_action, _safe_emit
 from src.util.extract_raw_prompt import extract_raw_prompt
 from src.util.generate_tools_docs import generate_tools_docs
 from src.util.python_executor import setup_interpreter
@@ -94,8 +94,24 @@ def _cobbie(
 
     # Initialize counters for comprehensive metrics
     code_execution_count = 0
-    total_code_execution_time = 0
+    total_code_execution_time = 0.0
+    total_llm_time = 0.0
     llm_calls = 0
+
+    # Emit one authoritative timing summary to the streaming callback before any
+    # return path. Built from loop-side totals (not the event stream) so it
+    # includes the FinalAnswer LLM call and schema-error retries, which never
+    # produce per-iteration events. The server enriches it with model-load and
+    # wall-clock numbers only it can see.
+    def _emit_timing(iterations_done: int) -> None:
+        _safe_emit(on_event, {
+            "type": "timing",
+            "llm_s": round(total_llm_time, 3),
+            "exec_s": round(total_code_execution_time, 3),
+            "iterations": iterations_done,
+            "llm_calls": llm_calls,
+            "code_executions": code_execution_count,
+        })
 
     # Initialize the previous_attempts
     previous_attempts = ""
@@ -140,6 +156,7 @@ def _cobbie(
                     }
                 )
 
+                llm_start = time.time()
                 result = _code_act_iter(
                     user_input=effective_question,
                     available_tools=tools_docs,
@@ -147,6 +164,9 @@ def _cobbie(
                     model_path=model_path,
                     **kwargs,
                 )
+                # Accumulate before branching so schema-error retries count too.
+                iter_llm_seconds = time.time() - llm_start
+                total_llm_time += iter_llm_seconds
 
                 if isinstance(result, AgentError):
                     if not schema_error_on_prev_iteration:
@@ -194,6 +214,7 @@ Please retry with the correct format.
                         )
                         llm_span.set_status("ERROR")
                         iteration_span.set_status("ERROR")
+                        _emit_timing(iteration + 1)
                         return result, previous_attempts, rendered_prompt
 
                 # Reset on success
@@ -287,10 +308,12 @@ Please retry with the correct format.
                 )
                 iteration_span.set_status("OK")
 
+                _emit_timing(iteration + 1)
                 return result, previous_attempts, rendered_prompt
 
             elif isinstance(result, CodeAction):
                 # Update the previous results
+                exec_start = time.time()
                 current_attempt = _execute_code_action(
                     code_action=result,
                     iteration=iteration,
@@ -299,7 +322,10 @@ Please retry with the correct format.
                     add_code_prefix=add_code_prefix,
                     interpreter=interpreter,
                     on_event=on_event,
+                    llm_seconds=iter_llm_seconds,
                 )
+                total_code_execution_time += time.time() - exec_start
+                code_execution_count += 1
                 previous_attempts += f"\n{current_attempt}\n"
 
                 iteration_span.set_attributes(
@@ -386,6 +412,7 @@ Please retry with the correct format.
         )
         final_span.set_status("OK")
 
+        _emit_timing(max_iterations)
         return final_answer, previous_attempts, rendered_prompt
 
 

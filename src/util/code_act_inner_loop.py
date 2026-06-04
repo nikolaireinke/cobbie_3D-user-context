@@ -1,3 +1,4 @@
+import time
 from typing import Any, Callable, Dict, Optional
 
 import mlflow
@@ -28,6 +29,7 @@ def _execute_code_action(
     add_code_prefix: bool = True,
     interpreter: Optional[Any] = None,
     on_event: Optional[Callable] = None,
+    llm_seconds: Optional[float] = None,
 ) -> str:
     """
     Execute a CodeAction from the agent return the the formated result of the attempt.
@@ -54,27 +56,32 @@ def _execute_code_action(
             }
         )
 
-        # Stream the agent's intent before running it.
+        # Stream the agent's intent before running it. llm_seconds is the latency
+        # of the LLM call that produced this CodeAction (measured by the caller).
         _safe_emit(on_event, {
             "type": "iteration",
             "iteration": iteration + 1,
             "thoughts": code_action.thoughts,
             "code": code_action.python_code,
+            "llm_seconds": llm_seconds,
         })
 
-        # Execute the code
+        # Execute the code (timed tightly for the per-iteration breakdown).
+        exec_start = time.time()
         result_code_evaluation = execute_python(
             python_code=python_code,
             tools=tools,
             model_path=model_path,
             interpreter=interpreter,
         )
+        exec_seconds = time.time() - exec_start
 
         # Stream the execution result.
         _safe_emit(on_event, {
             "type": "observation",
             "iteration": iteration + 1,
             "result": result_code_evaluation,
+            "exec_seconds": round(exec_seconds, 3),
         })
 
         # Update the previous attempt
