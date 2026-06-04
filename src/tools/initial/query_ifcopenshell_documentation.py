@@ -1,5 +1,6 @@
 import os
 import time
+from functools import lru_cache
 from typing import Literal
 
 import mlflow
@@ -10,6 +11,28 @@ from src.util.python_executor import count_tokens
 
 load_dotenv(find_dotenv())
 CONTEXT7_API_KEY = os.getenv("CONTEXT7_API_KEY")
+
+
+@lru_cache(maxsize=1)
+def docs_backend_available() -> bool:
+    """Whether the configured docs backend can actually return documentation.
+
+    This is a deploy-time constant (keyed off DOC_BACKEND, the Context7 API key,
+    and whether the local index has content), so it is cached for the process.
+    Callers use it to decide whether to advertise ``query_ifcopenshell_docs`` to
+    the agent at all — on deployments where the backend is unconfigured or empty,
+    advertising the tool only invites wasted iterations.
+    """
+    backend = os.getenv("DOC_BACKEND", "custom")
+    if backend == "context7":
+        return bool(os.getenv("CONTEXT7_API_KEY"))
+    # custom backend: usable only if the local vector index has content
+    try:
+        from src.docs_indexer.storage import DEFAULT_DB_PATH, DocVectorStore
+
+        return DocVectorStore(DEFAULT_DB_PATH).count_chunks() > 0
+    except Exception:
+        return False
 
 def _query_context7(query: str) -> str:
     """Query IfcOpenShell docs using Context7 API."""
@@ -102,6 +125,11 @@ def query_ifcopenshell_docs(query: str) -> None:
 
     Uses either Context7 API or local vector store depending on DOC_BACKEND.
     Results are printed to stdout.
+
+    Note: this tool may be unavailable on some deployments (no docs backend
+    configured or an empty index). If it returns an "unavailable" or "no
+    documentation found" message, proceed using your own ifcopenshell knowledge
+    and verify the result in code — do not retry the query.
 
     Args:
         query: The topic or query to focus the documentation on (e.g., "finds all entities of type `IfcWall`", "element bounding box", "clash detection", etc.)

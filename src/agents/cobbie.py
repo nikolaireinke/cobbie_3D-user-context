@@ -14,6 +14,7 @@ from loguru import logger
 
 from src.baml.baml_client.types import CodeAction, FinalAnswer
 from src.schemas.agent_error import AgentError, CobbiResult
+from src.tools.initial.query_ifcopenshell_documentation import docs_backend_available
 from src.util.code_act_inner_loop import _code_act_iter, _execute_code_action, _safe_emit
 from src.util.extract_raw_prompt import extract_raw_prompt
 from src.util.generate_tools_docs import generate_tools_docs
@@ -87,6 +88,14 @@ def _cobbie(
         and rendered_prompt is the system prompt from the first LLM call.
     """
     logger.info(f"Answering question: {question[:100]}...")
+
+    # Only advertise the docs tool when its backend can actually return docs.
+    # Where the backend is unconfigured/empty, advertising it just invites
+    # wasted iterations (the call returns an "unavailable" hint), so drop it here
+    # — the prompt's docs instructions are gated on its presence and vanish too.
+    if "query_ifcopenshell_docs" in tools and not docs_backend_available():
+        tools = {n: t for n, t in tools.items() if n != "query_ifcopenshell_docs"}
+        logger.info("Docs backend unavailable — hiding query_ifcopenshell_docs from this run.")
 
     # Prepare execution context
     tools_docs = generate_tools_docs(tools)
