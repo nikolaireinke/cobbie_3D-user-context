@@ -300,7 +300,7 @@ Please retry with the correct format.
                     interpreter=interpreter,
                     on_event=on_event,
                 )
-                previous_attempts += f"/n{current_attempt}/n"
+                previous_attempts += f"\n{current_attempt}\n"
 
                 iteration_span.set_attributes(
                     {
