@@ -125,8 +125,16 @@ function Cobbie(
   ## ACTION SELECTION
 
   Choose ONE of the following actions:
-  - CodeAction: You need to explore or analyze the BIM model further with Python code to gather necessary information.
-  - FinalAnswer: You have sufficient information to provide a complete and accurate answer to the question.
+  - CodeAction: explore or compute further with Python to gather information you do not yet have.
+  - FinalAnswer: you have already OBSERVED in the execution results everything your answer asserts.
+
+  ### GROUNDING GATE — check ALL of these before choosing FinalAnswer:
+  - Every concrete value, count, dimension, table cell, or computed result in your answer MUST appear in an actual execution result you have already seen (stdout/stderr above). If you intend to report numbers you have not yet computed and observed, choose CodeAction and compute them first — do not answer yet.
+  - Never describe code as having run, "succeeded", or "extracted" results unless that output is present above. If you catch yourself writing placeholders, blank table cells, or phrases like "results not captured", STOP: that means you are about to fabricate. Choose CodeAction instead.
+  - Citing a method (e.g. "computed from geometry") does NOT satisfy this — you must have the actual observed result, not just the method name.
+
+  ### BOUNDED EXIT — do not loop forever and do not fabricate:
+  - You have a limited number of iterations. If part of the question resists after a few genuine attempts (e.g. a computation keeps erroring), choose FinalAnswer that answers the parts you DID verify and explicitly states which part you could not determine and why (cite the error). A correct partial answer with a stated gap is better than a fabricated complete answer or exhausting your iterations.
 
   {{ ctx.output_format }}
 "#
