@@ -140,7 +140,9 @@ function Cobbie(
   {# Haiku ignores the schema and emits native tool-call XML; prefilling the
      assistant turn with a JSON fence forces it back into structured output.
      Some Claude models (e.g. Sonnet 4.6) reject assistant prefill, so gate it
-     to the client(s) that both need and support it. #}
+     to the client(s) that both need and support it.
+     NOTE: the "Claude_Haiku_4_5" literal must match the client name defined in
+     clients.baml — keep the two in sync if you rename the client. #}
   {% if ctx.client.name == "Claude_Haiku_4_5" %}
   {{ _.role("assistant") }}
   ```json

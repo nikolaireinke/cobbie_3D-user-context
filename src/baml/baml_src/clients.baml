@@ -125,6 +125,10 @@ client<llm> Claude_Sonnet_4_6 {
 }
 
 // Anthropic Claude Haiku 4.5 (fast, low-cost variant)
+// NOTE: the client name "Claude_Haiku_4_5" is matched by string in
+// cobbie.baml (ctx.client.name gate that prefills the assistant turn so
+// Haiku returns structured output instead of tool-call XML). If you rename
+// this client, update that gate too or Haiku will silently break.
 client<llm> Claude_Haiku_4_5 {
   provider anthropic
   retry_policy Exponential
