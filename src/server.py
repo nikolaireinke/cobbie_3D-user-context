@@ -32,6 +32,7 @@
 
 import argparse
 import asyncio
+import datetime
 import json
 import os
 import socket
@@ -61,6 +62,7 @@ class ServerState:
     max_iterations: int = 15
     add_code_prefix: bool = True  # binds path_ifc_model in the per-iteration prefix
     cache_models: bool = True     # keep opened ifcopenshell.file objects across queries
+    log_dir: str = None           # per-query transcript dir; None disables
 
 
 STATE = ServerState()
@@ -80,6 +82,53 @@ def get_cached_ifc(path: str):
         model = ifcopenshell.open(path)
         _MODEL_CACHE[path] = model
     return model
+
+
+# --------------------------------------------------------------------------
+# Per-query transcript logging (full, untruncated — unlike the console view).
+# --------------------------------------------------------------------------
+
+
+def open_query_log(question: str, model_path: str, context: dict | None = None):
+    """Open a per-query transcript file. Returns (file, path) or (None, None)."""
+    if not STATE.log_dir:
+        return None, None
+    os.makedirs(STATE.log_dir, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe = "".join(c if c.isalnum() else "_" for c in question[:40]).strip("_") or "query"
+    path = os.path.join(STATE.log_dir, f"{ts}_{safe}.log")
+    f = open(path, "w", encoding="utf-8")
+    f.write(f"timestamp : {datetime.datetime.now().isoformat()}\n")
+    f.write(f"model     : {model_path}\n")
+    f.write(f"question  : {question}\n")
+    if context:
+        sel = context.get("selection") or []
+        view = context.get("objects_in_view") or []
+        pose = context.get("user_pose") or {}
+        f.write(f"selection : {sel}\n")
+        f.write(f"in_view   : {len(view)} object(s)\n")
+        f.write(f"user_pose : {pose}\n")
+        f.write("context (full json):\n")
+        f.write(json.dumps(context, ensure_ascii=False, indent=2) + "\n")
+    else:
+        f.write("context   : (none)\n")
+    f.write("=" * 80 + "\n")
+    f.flush()
+    return f, path
+
+
+def log_event(f, ev: dict):
+    """Append one streamed event in full to the transcript (called on the worker thread)."""
+    if f is None:
+        return
+    t = ev.get("type")
+    if t == "iteration":
+        f.write(f"\n----- ITERATION {ev.get('iteration')} -----\n")
+        f.write(f"[thoughts]\n{ev.get('thoughts', '')}\n\n")
+        f.write(f"[code]\n{ev.get('code', '')}\n")
+    elif t == "observation":
+        f.write(f"\n[result of iteration {ev.get('iteration')}]\n{ev.get('result', '')}\n")
+    f.flush()
 app = FastAPI(title="cobbie-bridge")
 
 
@@ -270,14 +319,18 @@ async def ws_endpoint(ws: WebSocket):
 
             await ws.send_json({"type": "status", "stage": "running", "model": model_path})
 
+            # Full per-query transcript (untruncated), for inspecting code/results.
+            log_f, log_path = open_query_log(question, model_path, context)
+
             # Bridge: cobbie's on_event fires on the worker thread; hand each
             # event to the event loop, and drain them to the socket concurrently
             # while the blocking run proceeds.
             loop = asyncio.get_running_loop()
             event_q: asyncio.Queue = asyncio.Queue()
 
-            def on_event(ev, _loop=loop, _q=event_q):
-                _loop.call_soon_threadsafe(_q.put_nowait, ev)
+            def on_event(ev, _loop=loop, _q=event_q, _f=log_f):
+                log_event(_f, ev)                       # full transcript (worker thread)
+                _loop.call_soon_threadsafe(_q.put_nowait, ev)  # stream to socket
 
             async def drain():
                 while True:
@@ -296,6 +349,12 @@ async def ws_endpoint(ws: WebSocket):
             finally:
                 event_q.put_nowait(None)  # stop the drain task
                 await drain_task
+
+            if log_f is not None:
+                log_f.write("\n" + "=" * 80 + "\n")
+                log_f.write(f"[{payload.get('type')}]\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n")
+                log_f.close()
+                print(f"[server] query transcript: {log_path}", file=sys.stderr, flush=True)
 
             await ws.send_json(payload)
 
@@ -348,6 +407,10 @@ def main():
     parser.add_argument("--parent-pid", type=int, default=None)
     parser.add_argument("--no-cache-models", action="store_true",
                         help="Re-open the IFC on every query instead of caching it per path")
+    parser.add_argument("--log-dir", default=None,
+                        help="Dir for full per-query transcripts (default: <root>/query_logs)")
+    parser.add_argument("--no-query-logs", action="store_true",
+                        help="Disable per-query transcript files")
     parser.add_argument("--mlflow-dir", default=None,
                         help="Local MLflow file store (default: <root>/mlruns)")
     args = parser.parse_args()
@@ -365,6 +428,7 @@ def main():
     STATE.client = args.client
     STATE.max_iterations = args.max_iterations
     STATE.cache_models = not args.no_cache_models
+    STATE.log_dir = None if args.no_query_logs else (args.log_dir or os.path.join(root, "query_logs"))
     print(f"[server] loaded {len(STATE.tools)} tools; model={args.model}", file=sys.stderr, flush=True)
 
     if args.parent_pid:
