@@ -147,6 +147,10 @@ function Cobbie(
   - Keep citations brief and inline, e.g. "900 mm (Pset_Door.Width)" — not a separate sources/notes section.
   - Trim formatting, restatement, and hedging — never trim facts, scope, units, or grounding. A concise answer must still pass the GROUNDING GATE and address every part the question asks.
 
+  ### HIGHLIGHTS — tell the viewer which elements to show:
+  - When your answer concerns specific elements, set a Python list `highlight_guids = [...]` of their GlobalIds, collected in your code from the execution results (same grounding rules — only GlobalIds you have actually observed). Examples: every column matching the selected one, all elements sharing a material, the identified fire exit.
+  - Leave `highlight_guids` unset when the answer is simply about the element(s) already selected — the viewer falls back to the current selection.
+
   {# Dynamic tail: a fresh user message (no cache_control) so the growing
      PREVIOUS ATTEMPTS transcript stays OUT of the cached prefix above. BAML
      merges these consecutive user blocks into one message, with the cache

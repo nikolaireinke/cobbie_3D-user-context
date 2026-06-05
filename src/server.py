@@ -21,8 +21,8 @@
 #   server -> {"type":"status", "stage":"running", "model": str}
 #   server -> {"type":"iteration", "iteration": int, "thoughts": str, "code": str}   (streamed)
 #   server -> {"type":"observation", "iteration": int, "result": str}                (streamed)
-#   server -> {"type":"final", "answer": str, "reasoning": str, "success": bool}
-#         or  {"type":"error", "error": str, "error_type": str}
+#   server -> {"type":"highlight", "guids":[guid,...]}   (GlobalIds for the viewer
+#              to highlight; emitted once, non-empty, just before the final message)
 #   server -> {"type":"final", "answer": str, "reasoning": str, "success": bool}
 #         or  {"type":"error", "error": str, "error_type": str}
 #
@@ -141,6 +141,9 @@ def log_event(f, ev: dict):
         ex = ev.get("exec_seconds")
         suffix = f"  (exec {ex}s)" if ex is not None else ""
         f.write(f"\n[result of iteration {ev.get('iteration')}]{suffix}\n{ev.get('result', '')}\n")
+    elif t == "highlight":
+        guids = ev.get("guids") or []
+        f.write(f"\n[highlight] {len(guids)} object(s): {', '.join(guids)}\n")
     # "timing" events are folded into the end-of-query TIMING SUMMARY block.
     f.flush()
 

@@ -56,6 +56,49 @@ def _compose_briefing(
     return f"{briefing}\n\nQUESTION:\n{question}"
 
 
+def _extract_highlights(interpreter: Any, user_context: Optional[Dict]) -> list[str]:
+    """GlobalIds the viewer should highlight for this answer.
+
+    The agent declares them by setting `highlight_guids` in its code; if it sets
+    nothing we fall back to the user's current selection. Every GlobalId is
+    validated against the opened model (`model.by_guid`) so hallucinated or
+    malformed ids are dropped. Order-preserving dedupe, capped. Best-effort:
+    callers wrap this so it can never break the agent loop.
+    """
+    ns = getattr(interpreter, "locals", {}) or {}
+
+    raw = ns.get("highlight_guids")
+    if isinstance(raw, (list, tuple)):
+        guids = [g for g in raw if isinstance(g, str)]
+    elif isinstance(raw, str):
+        guids = [raw]
+    else:
+        guids = []
+
+    if not guids:  # fall back to the current selection
+        sel = (user_context or {}).get("selection") if user_context else ns.get("selection")
+        guids = [g for g in (sel or []) if isinstance(g, str)]
+
+    model = ns.get("model")  # pre-injected opened ifc file (server path)
+    if model is not None:
+        valid = []
+        for g in guids:
+            try:
+                if model.by_guid(g) is not None:
+                    valid.append(g)
+            except Exception:
+                pass  # unknown/malformed guid -> drop
+        guids = valid
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for g in guids:
+        if g not in seen:
+            seen.add(g)
+            out.append(g)
+    return out[:500]
+
+
 def _cobbie(
     question: str,
     tools: Dict[str, Callable],
@@ -316,6 +359,15 @@ Please retry with the correct format.
                     }
                 )
                 iteration_span.set_status("OK")
+
+                # Stream the agent's chosen highlight set (GlobalIds the viewer
+                # should highlight). Best-effort — never let it break the loop.
+                try:
+                    highlight_guids = _extract_highlights(interpreter, user_context)
+                    if highlight_guids:
+                        _safe_emit(on_event, {"type": "highlight", "guids": highlight_guids})
+                except Exception:
+                    pass
 
                 _emit_timing(iteration + 1)
                 return result, previous_attempts, rendered_prompt
