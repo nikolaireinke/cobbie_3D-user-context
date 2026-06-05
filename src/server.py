@@ -248,6 +248,13 @@ async def model_gltf(model_id: int):
         glb_path = resolve_glb(model_id)
     except ModelResolutionError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    size_mb = os.path.getsize(glb_path) / (1024 * 1024)
+    print(
+        f"[server] serving glTF: model_id={model_id} "
+        f"{os.path.basename(glb_path)} ({size_mb:.1f} MB)",
+        file=sys.stderr,
+        flush=True,
+    )
     return FileResponse(
         glb_path,
         media_type="model/gltf-binary",
