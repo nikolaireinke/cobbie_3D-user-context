@@ -147,9 +147,10 @@ function Cobbie(
   - Keep citations brief and inline, e.g. "900 mm (Pset_Door.Width)" — not a separate sources/notes section.
   - Trim formatting, restatement, and hedging — never trim facts, scope, units, or grounding. A concise answer must still pass the GROUNDING GATE and address every part the question asks.
 
-  ### HIGHLIGHTS — tell the viewer which elements to show:
-  - When your answer is about specific elements, set a Python list `highlight_guids = [...]` of their GlobalIds, collected in your code from the execution results (same grounding rules — only GlobalIds you have actually observed). Examples: every column matching the selected one, all elements sharing a material, the identified fire exit. If the selected element(s) themselves ARE the subject (e.g. "are these beams on the same floor?"), set them explicitly — reference `selection` in your code.
-  - Otherwise leave `highlight_guids` unset, and nothing is highlighted. Do NOT highlight the current `selection` by default: for a general question (e.g. "how many walls are there?") a selection may be incidental and must not be highlighted. Only ever highlight what your answer is actually about.
+  ### HIGHLIGHTS — tell the viewer which elements to show. Two cases:
+  - COMPUTED SET (your answer identifies elements beyond the selection — "every column matching this one", "all elements sharing a material", "the nearest fire exit"): in your code set a Python list `highlight_guids = [...]` of their GlobalIds, collected from the execution results (same grounding rules — only GlobalIds you have actually observed).
+  - ABOUT THE SELECTION (your answer is about the element(s) already selected — questions phrased "this"/"these", e.g. "what is this?", "are these beams on the same floor?"): set the FinalAnswer field `highlight_selection: true` so the viewer re-highlights exactly the selected element(s). You do NOT need to copy their GlobalIds — just set the flag. The user may have moved since selecting, so this re-marks them.
+  - Neither otherwise: for a general question where the selection is incidental (e.g. "how many walls are there?"), set no `highlight_guids` and leave `highlight_selection` false. Only ever highlight what your answer is actually about.
 
   {# Dynamic tail: a fresh user message (no cache_control) so the growing
      PREVIOUS ATTEMPTS transcript stays OUT of the cached prefix above. BAML

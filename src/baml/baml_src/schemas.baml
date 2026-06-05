@@ -16,6 +16,7 @@ class CodeAction {
 class FinalAnswer {
   thoughts string @description("Summary of findings")
   answer string @description("Final answer to user's question")
+  highlight_selection bool? @description("Set true when your answer is ABOUT the currently selected element(s) — questions phrased 'this'/'these' (e.g. 'what is this?', 'are these on the same floor?') — so the viewer re-highlights them (the user may have moved since selecting). Leave false/unset for general questions where the selection is incidental, or when you set highlight_guids in code for a computed set.")
 }
 
 // Tool creation result

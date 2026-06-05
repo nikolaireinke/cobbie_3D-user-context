@@ -56,15 +56,18 @@ def _compose_briefing(
     return f"{briefing}\n\nQUESTION:\n{question}"
 
 
-def _extract_highlights(interpreter: Any) -> list[str]:
+def _extract_highlights(interpreter: Any, highlight_selection: bool = False) -> list[str]:
     """GlobalIds the viewer should highlight for this answer.
 
-    Sourced ONLY from the `highlight_guids` list the agent sets in its code —
-    there is deliberately no selection fallback: a stray/incidental selection on
-    a general question must not trigger highlights. Each id is validated against
-    the opened model (`model.by_guid`) so hallucinated or malformed ids are
-    dropped. Order-preserving dedupe, capped. Best-effort: callers wrap this so
-    it can never break the agent loop.
+    Two deliberate sources, never a blind fallback:
+    - a computed set the agent assigns to `highlight_guids` in its code, or
+    - the current `selection`, but ONLY when the agent set `highlight_selection`
+      on its FinalAnswer (its answer is about the selected element[s]) — an
+      incidental selection on a general question must not trigger highlights.
+    A computed `highlight_guids` takes precedence. Each id is validated against
+    the opened model (`model.by_guid`) so hallucinated/malformed ids are dropped.
+    Order-preserving dedupe, capped. Best-effort: callers wrap this so it can
+    never break the agent loop.
     """
     ns = getattr(interpreter, "locals", {}) or {}
 
@@ -75,6 +78,9 @@ def _extract_highlights(interpreter: Any) -> list[str]:
         guids = [raw]
     else:
         guids = []
+
+    if not guids and highlight_selection:  # answer is about the selection
+        guids = [g for g in (ns.get("selection") or []) if isinstance(g, str)]
 
     model = ns.get("model")  # pre-injected opened ifc file (server path)
     if model is not None:
@@ -360,7 +366,10 @@ Please retry with the correct format.
                 # Stream the agent's chosen highlight set (GlobalIds the viewer
                 # should highlight). Best-effort — never let it break the loop.
                 try:
-                    highlight_guids = _extract_highlights(interpreter)
+                    highlight_guids = _extract_highlights(
+                        interpreter,
+                        highlight_selection=bool(getattr(result, "highlight_selection", False)),
+                    )
                     if highlight_guids:
                         _safe_emit(on_event, {"type": "highlight", "guids": highlight_guids})
                 except Exception:
