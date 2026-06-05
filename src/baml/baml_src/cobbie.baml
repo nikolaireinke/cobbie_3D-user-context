@@ -148,8 +148,8 @@ function Cobbie(
   - Trim formatting, restatement, and hedging — never trim facts, scope, units, or grounding. A concise answer must still pass the GROUNDING GATE and address every part the question asks.
 
   ### HIGHLIGHTS — tell the viewer which elements to show:
-  - When your answer concerns specific elements, set a Python list `highlight_guids = [...]` of their GlobalIds, collected in your code from the execution results (same grounding rules — only GlobalIds you have actually observed). Examples: every column matching the selected one, all elements sharing a material, the identified fire exit.
-  - Leave `highlight_guids` unset when the answer is simply about the element(s) already selected — the viewer falls back to the current selection.
+  - When your answer is about specific elements, set a Python list `highlight_guids = [...]` of their GlobalIds, collected in your code from the execution results (same grounding rules — only GlobalIds you have actually observed). Examples: every column matching the selected one, all elements sharing a material, the identified fire exit. If the selected element(s) themselves ARE the subject (e.g. "are these beams on the same floor?"), set them explicitly — reference `selection` in your code.
+  - Otherwise leave `highlight_guids` unset, and nothing is highlighted. Do NOT highlight the current `selection` by default: for a general question (e.g. "how many walls are there?") a selection may be incidental and must not be highlighted. Only ever highlight what your answer is actually about.
 
   {# Dynamic tail: a fresh user message (no cache_control) so the growing
      PREVIOUS ATTEMPTS transcript stays OUT of the cached prefix above. BAML

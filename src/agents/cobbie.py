@@ -56,14 +56,15 @@ def _compose_briefing(
     return f"{briefing}\n\nQUESTION:\n{question}"
 
 
-def _extract_highlights(interpreter: Any, user_context: Optional[Dict]) -> list[str]:
+def _extract_highlights(interpreter: Any) -> list[str]:
     """GlobalIds the viewer should highlight for this answer.
 
-    The agent declares them by setting `highlight_guids` in its code; if it sets
-    nothing we fall back to the user's current selection. Every GlobalId is
-    validated against the opened model (`model.by_guid`) so hallucinated or
-    malformed ids are dropped. Order-preserving dedupe, capped. Best-effort:
-    callers wrap this so it can never break the agent loop.
+    Sourced ONLY from the `highlight_guids` list the agent sets in its code —
+    there is deliberately no selection fallback: a stray/incidental selection on
+    a general question must not trigger highlights. Each id is validated against
+    the opened model (`model.by_guid`) so hallucinated or malformed ids are
+    dropped. Order-preserving dedupe, capped. Best-effort: callers wrap this so
+    it can never break the agent loop.
     """
     ns = getattr(interpreter, "locals", {}) or {}
 
@@ -74,10 +75,6 @@ def _extract_highlights(interpreter: Any, user_context: Optional[Dict]) -> list[
         guids = [raw]
     else:
         guids = []
-
-    if not guids:  # fall back to the current selection
-        sel = (user_context or {}).get("selection") if user_context else ns.get("selection")
-        guids = [g for g in (sel or []) if isinstance(g, str)]
 
     model = ns.get("model")  # pre-injected opened ifc file (server path)
     if model is not None:
@@ -363,7 +360,7 @@ Please retry with the correct format.
                 # Stream the agent's chosen highlight set (GlobalIds the viewer
                 # should highlight). Best-effort — never let it break the loop.
                 try:
-                    highlight_guids = _extract_highlights(interpreter, user_context)
+                    highlight_guids = _extract_highlights(interpreter)
                     if highlight_guids:
                         _safe_emit(on_event, {"type": "highlight", "guids": highlight_guids})
                 except Exception:
