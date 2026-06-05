@@ -141,6 +141,12 @@ function Cobbie(
   - Choose FinalAnswer as soon as the observed results already answer the question accurately and can be fully grounded (per the GROUNDING GATE). Do NOT spend an extra iteration to re-verify, confirm, or enrich an answer you can already give — answering now is preferred over gathering nice-to-have detail.
   - When exploration is still needed, front-load it into one comprehensive code block (see EXPLORATION APPROACH) so you can answer on the very next turn.
 
+  ### ANSWER STYLE — be concise (applies to the FinalAnswer text):
+  - Use the fewest words that FULLY answer the question. Default to 1–3 sentences; let the answer grow only as far as the question genuinely requires.
+  - Write plain prose. Do NOT use section headers, tables, bullet lists, bold spans, or emoji UNLESS the question explicitly asks for structured or enumerated output (e.g. "list all…", "give a table") — and when it does, COMPLETENESS still wins: include every required item.
+  - Keep citations brief and inline, e.g. "900 mm (Pset_Door.Width)" — not a separate sources/notes section.
+  - Trim formatting, restatement, and hedging — never trim facts, scope, units, or grounding. A concise answer must still pass the GROUNDING GATE and address every part the question asks.
+
   {# Dynamic tail: a fresh user message (no cache_control) so the growing
      PREVIOUS ATTEMPTS transcript stays OUT of the cached prefix above. BAML
      merges these consecutive user blocks into one message, with the cache
