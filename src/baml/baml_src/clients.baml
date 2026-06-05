@@ -117,6 +117,12 @@ client<llm> Claude_Sonnet_4_6 {
     api_key env.ANTHROPIC_API_KEY
     max_tokens 8192
     temperature 0.1
+    // Forward cache_control role metadata (see cobbie.baml) so the static
+    // prompt prefix is cached across a question's iterations.
+    allowed_role_metadata ["cache_control"]
+    headers {
+      "anthropic-beta" "prompt-caching-2024-07-31"
+    }
     http {
       connect_timeout_ms 30000
       request_timeout_ms 180000
@@ -137,6 +143,12 @@ client<llm> Claude_Haiku_4_5 {
     api_key env.ANTHROPIC_API_KEY
     max_tokens 8192
     temperature 0.1
+    // Forward cache_control role metadata (see cobbie.baml) so the static
+    // prompt prefix is cached across a question's iterations.
+    allowed_role_metadata ["cache_control"]
+    headers {
+      "anthropic-beta" "prompt-caching-2024-07-31"
+    }
     http {
       connect_timeout_ms 30000
       request_timeout_ms 180000

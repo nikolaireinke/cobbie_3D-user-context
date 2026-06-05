@@ -20,7 +20,13 @@ function Cobbie(
   Your code runs in a persistent Python session. Variables, imports, loaded models, and computed results from previous iterations are still available — reuse them instead of recomputing.
   Note: only stdout and stderr are visible in the execution results, and that output is capped (~2048 tokens) — anything beyond is truncated. Print only the targeted fields you need, not whole entities or `dir()` dumps, or you may lose the very data you were after and have to re-run.
 
-  {{ _.role("user") }}
+  {# Everything from here through the instruction blocks below is the static,
+     reusable prefix (stable across a question's iterations: question, tool docs,
+     and all criteria). Marking it cache_control caches that prefix so iterations
+     2..N only pay for the growing PREVIOUS ATTEMPTS tail + output. The dynamic
+     tail (previous_attempts) is emitted in a separate, uncached user message
+     near the end — keep it out of this block. #}
+  {{ _.role("user", cache_control={"type": "ephemeral"}) }}
   Question: {{ user_input }}
 
   ## AVAILABLE TOOLS
@@ -30,12 +36,6 @@ function Cobbie(
 
   {% if "query_ifcopenshell_docs" in available_tools %}
   NOTE: When you are unsure of the correct ifcopenshell API for a non-trivial operation, use `query_ifcopenshell_docs` to look it up. You do NOT need it for basic calls you already know (e.g. `by_type`, `by_guid`, `is_a()`, attribute access) — querying for those just wastes an iteration. When you do need it, query the docs and run the dependent code in the same iteration rather than as a separate step.
-  {% endif %}
-  {% if previous_attempts %}
-
-  ## PREVIOUS ATTEMPTS
-
-  {{ previous_attempts }}
   {% endif %}
 
   ## EXPLORATION APPROACH
@@ -141,6 +141,17 @@ function Cobbie(
   - Choose FinalAnswer as soon as the observed results already answer the question accurately and can be fully grounded (per the GROUNDING GATE). Do NOT spend an extra iteration to re-verify, confirm, or enrich an answer you can already give — answering now is preferred over gathering nice-to-have detail.
   - When exploration is still needed, front-load it into one comprehensive code block (see EXPLORATION APPROACH) so you can answer on the very next turn.
 
+  {# Dynamic tail: a fresh user message (no cache_control) so the growing
+     PREVIOUS ATTEMPTS transcript stays OUT of the cached prefix above. BAML
+     merges these consecutive user blocks into one message, with the cache
+     breakpoint at the end of the static block. #}
+  {{ _.role("user") }}
+  {% if previous_attempts %}
+  ## PREVIOUS ATTEMPTS
+
+  {{ previous_attempts }}
+
+  {% endif %}
   {{ ctx.output_format }}
   {# Haiku ignores the schema and emits native tool-call XML; prefilling the
      assistant turn with a JSON fence forces it back into structured output.
