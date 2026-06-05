@@ -42,11 +42,18 @@ _FAIL_FAST = "fail_fast"        # cannot succeed on retry; stop now
 
 
 def _http_status(e: Exception) -> int | None:
-    """Best-effort HTTP status code from a BAML client error."""
+    """Best-effort HTTP status code from a BAML client error.
+
+    Prefer the structured attribute (always set on BamlClientHttpError). The
+    string fallback anchors on a `status_code=`/`code=` label only — no bare
+    3-digit match, which could pick up an unrelated number (token count, id,
+    line). If neither is found we return None, and the caller backs off rather
+    than guessing a status.
+    """
     code = getattr(e, "status_code", None)
     if isinstance(code, int):
         return code
-    m = re.search(r"status_code=(\d{3})", str(e)) or re.search(r"\b([45]\d\d)\b", str(e))
+    m = re.search(r"(?:status_code|code)=(\d{3})", str(e))
     return int(m.group(1)) if m else None
 
 
