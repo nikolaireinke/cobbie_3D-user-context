@@ -48,6 +48,7 @@ from typing import Any
 import mlflow
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from src.agents.cobbie import cobbie
@@ -162,6 +163,21 @@ def write_timing_summary(f, t: dict):
     )
     f.flush()
 app = FastAPI(title="cobbie-bridge")
+
+# Allow browser/WebGL builds (which enforce CORS, unlike the Editor/Standalone
+# UnityWebRequest) to fetch /models and the .glb geometry cross-origin.
+# Permissive by design: a local single-user research bridge serving GET-only
+# data with no credentials. Tighten allow_origins if ever exposed beyond
+# localhost. expose_headers lets the client read the range/length headers
+# glTFast may rely on when streaming the .glb.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Length", "Content-Range", "Accept-Ranges", "Content-Disposition"],
+)
 
 
 @app.get("/health")
