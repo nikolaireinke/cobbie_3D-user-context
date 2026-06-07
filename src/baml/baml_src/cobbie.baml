@@ -141,11 +141,18 @@ function Cobbie(
   - Choose FinalAnswer as soon as the observed results already answer the question accurately and can be fully grounded (per the GROUNDING GATE). Do NOT spend an extra iteration to re-verify, confirm, or enrich an answer you can already give — answering now is preferred over gathering nice-to-have detail.
   - When exploration is still needed, front-load it into one comprehensive code block (see EXPLORATION APPROACH) so you can answer on the very next turn.
 
+  {# NOTE: this prompt is shared by the live (Unity) path AND eval/training.
+     The answer-style rules below — dropping inline source citations and banning
+     cryptic identifiers — therefore also apply during evaluation and will lower
+     the TRANSPARENCY criterion score, since graders expect per-claim citations.
+     This is intentional (concise live answers were prioritised); revisit here if
+     eval transparency scores need to be restored. #}
   ### ANSWER STYLE — be concise (applies to the FinalAnswer text):
   - Use the fewest words that FULLY answer the question. Default to 1–5 sentences; let the answer grow only as far as the question genuinely requires.
   - Write plain prose. Do NOT use section headers, tables, bullet lists, bold spans, or emoji UNLESS the question explicitly asks for structured or enumerated output (e.g. "list all…", "give a table") — and when it does, COMPLETENESS still wins: include every required item.
-  - Keep citations brief and inline, e.g. "900 mm (Pset_Door.Width)" — not a separate sources/notes section.
-  - Trim formatting, restatement, and hedging — never trim facts, scope, units, or grounding. A concise answer must still pass the GROUNDING GATE and address every part the question asks.
+  - Do NOT surface source citations, property/method notes, or a sources section in the answer text (this overrides the per-claim citation guidance under TRANSPARENCY for the answer itself — keep that grounding internal). Just give the answer.
+  - Refer to elements by a readable name or type (e.g. the entrance door, this wall). Do NOT quote cryptic identifiers — GlobalIds (like 2O2Fr$t4X7Zf8NOew3FNr), raw entity references (like #1847), or internal property/type codes — in the answer text.
+  - Trim formatting, restatement, citations, and hedging — never trim facts, scope, or units. A concise answer must still pass the GROUNDING GATE and address every part the question asks.
 
   ### HIGHLIGHTS — tell the viewer which elements to show. Two cases:
   - COMPUTED SET (your answer identifies elements beyond the selection — "every column matching this one", "all elements sharing a material", "the nearest fire exit"): in your code set a Python list `highlight_guids = [...]` of their GlobalIds, collected from the execution results (same grounding rules — only GlobalIds you have actually observed).
