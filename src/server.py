@@ -66,7 +66,7 @@ class ServerState:
     tools: dict = {}
     default_model_path: str = TEST_IFC_PATH
     client: str = "Claude_Sonnet_4_6"
-    max_iterations: int = 15
+    max_iterations: int = 5
     add_code_prefix: bool = True  # binds path_ifc_model in the per-iteration prefix
     cache_models: bool = True     # keep opened ifcopenshell.file objects across queries
     log_dir: str = None           # per-query transcript dir; None disables
@@ -548,7 +548,7 @@ def main():
     parser.add_argument("--client", default="Claude_Sonnet_4_6", help="BAML primary client")
     parser.add_argument("--tools", nargs="+", default=["initial"],
                         choices=["initial", "created", "manual"])
-    parser.add_argument("--max-iterations", type=int, default=15)
+    parser.add_argument("--max-iterations", type=int, default=5)
     parser.add_argument("--parent-pid", type=int, default=None)
     parser.add_argument("--no-cache-models", action="store_true",
                         help="Re-open the IFC on every query instead of caching it per path")
