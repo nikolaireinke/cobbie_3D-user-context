@@ -56,28 +56,36 @@ def _compose_briefing(
     return f"{briefing}\n\nQUESTION:\n{question}"
 
 
-def _extract_highlights(interpreter: Any, highlight_selection: bool = False) -> list[str]:
+def _extract_highlights(
+    interpreter: Any,
+    answer_guids: Optional[list[str]] = None,
+    highlight_selection: bool = False,
+) -> list[str]:
     """GlobalIds the viewer should highlight for this answer.
 
-    Two deliberate sources, never a blind fallback:
-    - a computed set the agent assigns to `highlight_guids` in its code, or
-    - the current `selection`, but ONLY when the agent set `highlight_selection`
-      on its FinalAnswer (its answer is about the selected element[s]) — an
-      incidental selection on a general question must not trigger highlights.
-    A computed `highlight_guids` takes precedence. Each id is validated against
-    the opened model (`model.by_guid`) so hallucinated/malformed ids are dropped.
-    Order-preserving dedupe, capped. Best-effort: callers wrap this so it can
-    never break the agent loop.
+    Deliberate agent intent only, never a blind fallback. Two computed-set
+    channels, unioned (both are explicit intent):
+    - GlobalIds the agent returns in its FinalAnswer `highlight_guids` field
+      (the natural channel — produced in the same breath as the answer text), and
+    - a `highlight_guids` list the agent assigns in its code (for large
+      programmatic sets it would rather not inline in the answer).
+    Flag-gated fallback, only when both of the above are empty: the current
+    `selection`, but ONLY when the agent set `highlight_selection` on its
+    FinalAnswer (its answer is about the selected element[s]) — an incidental
+    selection on a general question must not trigger highlights.
+    Each id is validated against the opened model (`model.by_guid`) so
+    hallucinated/malformed ids are dropped. Order-preserving dedupe, capped.
+    Best-effort: callers wrap this so it can never break the agent loop.
     """
     ns = getattr(interpreter, "locals", {}) or {}
 
+    guids = [g for g in (answer_guids or []) if isinstance(g, str)]
+
     raw = ns.get("highlight_guids")
     if isinstance(raw, (list, tuple)):
-        guids = [g for g in raw if isinstance(g, str)]
+        guids.extend(g for g in raw if isinstance(g, str))
     elif isinstance(raw, str):
-        guids = [raw]
-    else:
-        guids = []
+        guids.append(raw)
 
     if not guids and highlight_selection:  # answer is about the selection
         guids = [g for g in (ns.get("selection") or []) if isinstance(g, str)]
@@ -368,6 +376,7 @@ Please retry with the correct format.
                 try:
                     highlight_guids = _extract_highlights(
                         interpreter,
+                        answer_guids=getattr(result, "highlight_guids", None),
                         highlight_selection=bool(getattr(result, "highlight_selection", False)),
                     )
                     if highlight_guids:

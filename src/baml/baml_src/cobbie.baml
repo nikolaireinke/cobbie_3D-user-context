@@ -154,10 +154,12 @@ function Cobbie(
   - Refer to elements by a readable name or type (e.g. the entrance door, this wall). Do NOT quote cryptic identifiers — GlobalIds (like 2O2Fr$t4X7Zf8NOew3FNr), raw entity references (like #1847), or internal property/type codes — in the answer text.
   - Trim formatting, restatement, citations, and hedging — never trim facts, scope, or units. A concise answer must still pass the GROUNDING GATE and address every part the question asks.
 
-  ### HIGHLIGHTS — tell the viewer which elements to show. Two cases:
-  - COMPUTED SET (your answer identifies elements beyond the selection — "every column matching this one", "all elements sharing a material", "the nearest fire exit"): in your code set a Python list `highlight_guids = [...]` of their GlobalIds, collected from the execution results (same grounding rules — only GlobalIds you have actually observed).
+  ### HIGHLIGHTS — tell the viewer which elements to show.
+  Highlighting happens ONLY through the structured channels below. Printing GlobalIds, or describing the highlight in your answer prose, does NOTHING on its own — the viewer highlights exactly what these channels carry, and nothing else.
+  - COMPUTED SET (your answer identifies specific elements — "highlight all stairs", "every column matching this one", "all elements sharing a material", "the nearest fire exit"): return their GlobalIds in the FinalAnswer `highlight_guids` field. For a large set you would rather not inline in the answer, instead assign a Python list `highlight_guids = [...]` in a code block that RUNS; both channels are honoured. Either way, use only GlobalIds you have actually observed in the execution results.
   - ABOUT THE SELECTION (your answer is about the element(s) already selected — questions phrased "this"/"these", e.g. "what is this?", "are these beams on the same floor?"): set the FinalAnswer field `highlight_selection: true` so the viewer re-highlights exactly the selected element(s). You do NOT need to copy their GlobalIds — just set the flag. The user may have moved since selecting, so this re-marks them.
-  - Neither otherwise: for a general question where the selection is incidental (e.g. "how many walls are there?"), set no `highlight_guids` and leave `highlight_selection` false. Only ever highlight what your answer is actually about.
+  - Neither otherwise: for a general question where the selection is incidental (e.g. "how many walls are there?"), populate no GlobalIds and leave `highlight_selection` false. Only ever highlight what your answer is actually about.
+  - CONSISTENCY (required): never state in your answer that you highlighted, marked, or showed any element unless you populated `highlight_guids` (field or code variable) or set `highlight_selection: true`. When you do populate them, a brief confirmation ("I've highlighted them") is fine; when you do not, do not claim you did.
 
   {# Dynamic tail: a fresh user message (no cache_control) so the growing
      PREVIOUS ATTEMPTS transcript stays OUT of the cached prefix above. BAML
