@@ -280,6 +280,62 @@ async def list_elements(
     return {"model": path, "count": len(elements), "elements": elements}
 
 
+def _entity_brief(e) -> dict | None:
+    """Compact {ifc_class, name} for a related entity (storey, type, ...)."""
+    if e is None:
+        return None
+    return {"ifc_class": e.is_a(), "name": getattr(e, "Name", None)}
+
+
+@app.get("/element")
+async def get_element(
+    guid: str,
+    model_id: int | None = None,
+    model_path: str | None = None,
+):
+    """Metadata for one element, looked up by GlobalId — the same id the viewer
+    selects and highlights. Feeds a selection-detail panel: identity, spatial
+    container, type, materials, and every property/quantity set. Geometry stays
+    in the .glb; this serves the semantics on demand from the live IFC model."""
+    try:
+        path = resolve_model(model_id, model_path)
+    except ModelResolutionError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    def work():
+        import ifcopenshell.util.element as ue
+
+        # Touch the (possibly shared) cached file under the agent lock.
+        with _AGENT_LOCK:
+            if STATE.cache_models:
+                model = get_cached_ifc(path)
+            else:
+                import ifcopenshell
+                model = ifcopenshell.open(path)
+            try:
+                el = model.by_guid(guid)
+            except RuntimeError:
+                el = None
+            if el is None:
+                raise HTTPException(status_code=404, detail=f"No element with guid={guid}")
+            return {
+                "guid": el.GlobalId,
+                "ifc_class": el.is_a(),
+                "name": getattr(el, "Name", None),
+                "description": getattr(el, "Description", None),
+                "tag": getattr(el, "Tag", None),
+                "object_type": getattr(el, "ObjectType", None),
+                "container": _entity_brief(ue.get_container(el)),
+                "type": _entity_brief(ue.get_type(el)),
+                "materials": [
+                    m.Name for m in ue.get_materials(el) if getattr(m, "Name", None)
+                ],
+                "psets": ue.get_psets(el),  # property + quantity sets, primitives
+            }
+
+    return await asyncio.to_thread(work)
+
+
 @app.get("/model-gltf")
 async def model_gltf(model_id: int):
     """Stream a model's generated .glb (glTF nodes are named by IFC GlobalId).
