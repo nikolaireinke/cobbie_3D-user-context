@@ -45,7 +45,7 @@ import socket
 import sys
 import threading
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from typing import Any
 
 import mlflow
@@ -73,42 +73,72 @@ class ServerState:
     max_iterations: int = 5
     add_code_prefix: bool = True  # binds path_ifc_model in the per-iteration prefix
     cache_models: bool = True     # keep opened ifcopenshell.file objects across queries
+    max_concurrency: int = 2      # how many agent queries may run at once
     log_dir: str = None           # per-query transcript dir; None disables
 
 
 STATE = ServerState()
 
-# ifcopenshell.file is not safe for concurrent access, so each opened instance
-# is touched single-threaded under a lock. We keep TWO instances per model so a
-# long-running agent query never blocks the viewer's metadata reads:
-#   - _MODEL_CACHE / _AGENT_LOCK: the instance the agent run uses. The lock is
-#     held for the whole run, so it also serializes agent runs (one at a time).
-#   - _READ_MODEL_CACHE / _READ_LOCK: a separate read-only instance for the
-#     /elements and /element endpoints. Reads are ms, so serializing them on
-#     their own lock is fine, and they proceed while a query holds _AGENT_LOCK.
-# Separate ifcopenshell.open() objects share no mutable state, so the two run
-# concurrently safely. Cost: ~double the per-model memory.
-# Fine for single-user research; revisit (instance pool + semaphore) for truly
-# concurrent agent runs — see the MLflow run-stack caveat first.
-_MODEL_CACHE: dict = {}
-_AGENT_LOCK = threading.Lock()
+# ifcopenshell.file is not safe for concurrent access, so every opened instance
+# is only ever touched by one thread at a time. Two distinct instance families
+# keep the viewer responsive while agent queries run, and let queries run in
+# parallel:
+#   - Agent pool (_AGENT_POOL): each agent run checks out its OWN instance for
+#     its whole duration (the agent's generated code touches the model
+#     unpredictably). _AGENT_SEM bounds how many run at once; per-path pools
+#     reuse warm instances so back-to-back runs skip the open cost.
+#   - Read instances (_READ_MODEL_CACHE / _READ_LOCK): one read-only instance
+#     per model for the /elements and /element endpoints. Reads are ms, so
+#     serializing them on their own lock is fine, and they proceed regardless of
+#     what the agent pool is doing.
+# Separate ifcopenshell.open() objects share no mutable state, so all of these
+# run concurrently safely. Cost: up to (max_concurrency + 1) instances per model
+# in memory. Fine for single-user research.
 _READ_MODEL_CACHE: dict = {}
 _READ_LOCK = threading.Lock()
 
+# Agent-run instance pool. _AGENT_SEM caps concurrent runs; main() resizes it
+# from --max-concurrency. _current_agent_model carries the run's instance to its
+# own on_event callbacks (which fire synchronously on the run's worker thread).
+_AGENT_POOL: dict[str, list] = {}
+_POOL_LOCK = threading.Lock()
+_AGENT_SEM = threading.Semaphore(ServerState.max_concurrency)
+_current_agent_model = threading.local()
 
-def get_cached_ifc(path: str):
-    """The agent's model instance. Callers hold _AGENT_LOCK."""
-    model = _MODEL_CACHE.get(path)
-    if model is None:
-        import ifcopenshell  # already a dependency; imported lazily
-        model = ifcopenshell.open(path)
-        _MODEL_CACHE[path] = model
-    return model
+
+@contextmanager
+def checkout_agent_ifc(path: str, timing: dict | None = None):
+    """Check out an ifcopenshell instance for one agent run. _AGENT_SEM bounds
+    concurrency; each run gets its own instance (ifcopenshell.file is not
+    thread-safe). Instances are pooled per path and reused when caching is on
+    (warm runs skip the open); with caching off they are opened per run and
+    dropped. If given, ``timing['load_s']`` records the cold-open cost (0 on a
+    warm reuse)."""
+    _AGENT_SEM.acquire()
+    inst = None
+    try:
+        with _POOL_LOCK:
+            pool = _AGENT_POOL.get(path)
+            inst = pool.pop() if pool else None
+        if inst is None:
+            import ifcopenshell  # already a dependency; imported lazily
+            t0 = time.time()
+            inst = ifcopenshell.open(path)
+            if timing is not None:
+                timing["load_s"] = round(time.time() - t0, 3)
+        elif timing is not None:
+            timing["load_s"] = 0.0
+        yield inst
+    finally:
+        if inst is not None and STATE.cache_models:
+            with _POOL_LOCK:
+                _AGENT_POOL.setdefault(path, []).append(inst)
+        _AGENT_SEM.release()
 
 
 def get_read_ifc(path: str):
     """The metadata endpoints' read-only model instance, separate from the
-    agent's so /element and /elements never block on (or share state with) a
+    agent pool so /element and /elements never block on (or share state with) a
     running query. Callers hold _READ_LOCK."""
     model = _READ_MODEL_CACHE.get(path)
     if model is None:
@@ -123,12 +153,15 @@ def resolve_drawable_highlights(guids: list[str], model_path: str) -> list[str]:
     actually draw (geometry-bearing glTF nodes), expanding geometry-less
     assembly containers to their geometry leaves. Best-effort: any failure
     returns the original list so a resolver bug never silently drops a highlight
-    the client would otherwise have shown. Runs on the agent's worker thread, so
-    the cached ifcopenshell model is accessed single-threaded."""
+    the client would otherwise have shown. Runs synchronously on the agent's
+    worker thread, so it reads that run's own instance from the thread-local and
+    never touches another concurrent run's model."""
     if not guids:
         return guids
+    model = getattr(_current_agent_model, "model", None)
+    if model is None:  # called outside an agent run — don't touch shared state
+        return guids
     try:
-        model = get_cached_ifc(model_path)
         return resolve_highlight_guids(model, guids, glb_path_from_ifc(model_path))
     except Exception as e:  # noqa: BLE001 - never let highlight resolution break the run
         print(f"[server] highlight resolution failed: {e}", file=sys.stderr, flush=True)
@@ -457,25 +490,29 @@ def run_cobbie_blocking(
     model_path: str,
     on_event=None,
 ) -> dict[str, Any]:
-    # Serialize agent runs while caching (shared ifcopenshell.file isn't
-    # concurrency-safe). With caching off, runs are independent.
-    with _AGENT_LOCK:
-        # Time the (possibly cold) IFC open so the transcript can separate model
-        # load from reasoning. Cached hits are ~0; first open can be seconds.
-        _load_start = time.time()
-        ifc_model = get_cached_ifc(model_path) if STATE.cache_models else None
-        model_load_s = round(time.time() - _load_start, 3)
-        result = cobbie(
-            user_input=question,
-            tools=STATE.tools,
-            max_iterations=STATE.max_iterations,
-            model_path=model_path,
-            add_code_prefix=STATE.add_code_prefix,
-            client=STATE.client,
-            user_context=context,   # injected as model.by_guid-resolvable variables
-            ifc_model=ifc_model,    # pre-opened; None -> agent opens from model_path
-            on_event=on_event,      # per-iteration streaming
-        )
+    # Check out this run's own model instance. _AGENT_SEM bounds concurrency;
+    # the checkout blocks here if max_concurrency runs are already in flight.
+    # The instance is published on a thread-local so this run's on_event
+    # callbacks (highlight resolution) use it, never another run's. model_load_s
+    # separates the (possibly cold) IFC open from reasoning in the transcript.
+    _timing: dict = {}
+    with checkout_agent_ifc(model_path, _timing) as ifc_model:
+        _current_agent_model.model = ifc_model
+        try:
+            result = cobbie(
+                user_input=question,
+                tools=STATE.tools,
+                max_iterations=STATE.max_iterations,
+                model_path=model_path,
+                add_code_prefix=STATE.add_code_prefix,
+                client=STATE.client,
+                user_context=context,   # injected as model.by_guid-resolvable variables
+                ifc_model=ifc_model,    # this run's checked-out instance
+                on_event=on_event,      # per-iteration streaming
+            )
+        finally:
+            _current_agent_model.model = None
+    model_load_s = _timing.get("load_s", 0.0)
 
     if result.error is not None:
         return {
@@ -672,6 +709,8 @@ def main():
     parser.add_argument("--tools", nargs="+", default=["initial"],
                         choices=["initial", "created", "manual"])
     parser.add_argument("--max-iterations", type=int, default=5)
+    parser.add_argument("--max-concurrency", type=int, default=2,
+                        help="How many agent queries may run at once")
     parser.add_argument("--parent-pid", type=int, default=None)
     parser.add_argument("--no-cache-models", action="store_true",
                         help="Re-open the IFC on every query instead of caching it per path")
@@ -698,6 +737,9 @@ def main():
     STATE.client = args.client
     STATE.max_iterations = args.max_iterations
     STATE.cache_models = not args.no_cache_models
+    STATE.max_concurrency = args.max_concurrency
+    global _AGENT_SEM
+    _AGENT_SEM = threading.Semaphore(STATE.max_concurrency)
     STATE.log_dir = None if args.no_query_logs else (args.log_dir or os.path.join(root, "query_logs"))
     print(f"[server] loaded {len(STATE.tools)} tools; model={args.model}", file=sys.stderr, flush=True)
 
