@@ -153,6 +153,7 @@ function Cobbie(
   - Do NOT surface source citations, property/method notes, or a sources section in the answer text (this overrides the per-claim citation guidance under TRANSPARENCY for the answer itself — keep that grounding internal). Just give the answer.
   - Refer to elements by a readable name or type (e.g. the entrance door, this wall). Do NOT quote cryptic identifiers — GlobalIds (like 2O2Fr$t4X7Zf8NOew3FNr), raw entity references (like #1847), or internal property/type codes — in the answer text.
   - Trim formatting, restatement, citations, and hedging — never trim facts, scope, or units. A concise answer must still pass the GROUNDING GATE and address every part the question asks.
+  - Answer in the same language as the user's question. Keep IFC/BIM technical terms and identifiers in their canonical form — do not translate `IfcWall`, Pset names, etc.
 
   ### HIGHLIGHTS — tell the viewer which elements to show.
   Highlighting happens ONLY through the structured channels below. Printing GlobalIds, or describing the highlight in your answer prose, does NOTHING on its own — the viewer highlights exactly what these channels carry, and nothing else.
