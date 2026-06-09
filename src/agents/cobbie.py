@@ -182,6 +182,12 @@ def _cobbie(
     # Track whether the previous iteration was a schema error (for prompt feedback)
     schema_error_on_prev_iteration = False
 
+    # Guard against a turn-1 FinalAnswer with zero code: the model cannot have
+    # OBSERVED any count, GlobalId, or value without running code, so such an
+    # answer is fabricated. We force one code pass by nudging and looping — at
+    # most ONCE, so a question that legitimately needs no code still terminates.
+    forced_code_nudge_done = False
+
     # Rendered system prompt (captured from the first successful LLM call)
     rendered_prompt: str | None = None
 
@@ -344,6 +350,27 @@ Please retry with the correct format.
 
             # Handle union type flow control
             if isinstance(result, FinalAnswer):
+                # Reject a FinalAnswer that ran no code: its counts/GlobalIds/
+                # values cannot have been observed, so they are fabricated. Nudge
+                # once to force a grounding code pass, then let it answer.
+                if code_execution_count == 0 and not forced_code_nudge_done:
+                    forced_code_nudge_done = True
+                    previous_attempts += f"""
+--- Iteration {iteration + 1} ---
+GROUNDING ERROR: You returned a FinalAnswer without running any code, so every
+count, GlobalId, dimension, or value in it is unverified — you cannot know these
+without inspecting the model. Do NOT answer yet. Choose CodeAction and inspect
+the model (e.g. by_type / by_guid, then print the GlobalIds and counts you need).
+Only assert facts — and only put GlobalIds in highlight_guids — that appear in the
+execution output you observe.
+"""
+                    logger.warning(
+                        f"FinalAnswer with zero code on iteration {iteration + 1}; "
+                        f"injecting grounding nudge and forcing a code pass."
+                    )
+                    iteration_span.set_status("ERROR")
+                    continue  # next iteration of the Cobbie loop
+
                 logger.info(
                     f"Number of iterations: {iteration + 1}"
                 )
