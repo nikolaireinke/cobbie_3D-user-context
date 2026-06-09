@@ -32,6 +32,15 @@ def glb_path_for(project_name: str, model_name: str) -> str:
     return os.path.join(DIRECTORY_GLTF_MODELS_PATH, project_name, f"{model_name}.glb")
 
 
+def glb_path_from_ifc(ifc_path: str) -> str:
+    """The ``.glb`` path for a given source ``.ifc`` path, mirroring the layout
+    swap bim_models/ -> gltf_models/ and .ifc -> .glb. Used to find the built
+    geometry for a model the server resolved by path (not just by DB id)."""
+    rel = os.path.relpath(ifc_path, DIRECTORY_IFC_MODELS_PATH)
+    base, _ = os.path.splitext(rel)
+    return os.path.join(DIRECTORY_GLTF_MODELS_PATH, f"{base}.glb")
+
+
 def ifc_path_for(rec) -> str | None:
     """Resolve a registered model's IFC path on this machine.
 

@@ -22,7 +22,10 @@
 #   server -> {"type":"iteration", "iteration": int, "thoughts": str, "code": str}   (streamed)
 #   server -> {"type":"observation", "iteration": int, "result": str}                (streamed)
 #   server -> {"type":"highlight", "guids":[guid,...]}   (GlobalIds for the viewer
-#              to highlight; emitted once, non-empty, just before the final message)
+#              to highlight; emitted once, non-empty, just before the final message.
+#              Resolved server-side to geometry-bearing GlobalIds the client can
+#              draw — geometry-less containers like IfcStair are expanded to their
+#              geometry leaves; suppressed entirely if nothing is drawable.)
 #   server -> {"type":"final", "answer": str, "reasoning": str, "success": bool}
 #         or  {"type":"error", "error": str, "error_type": str}
 #
@@ -54,7 +57,8 @@ from fastapi.responses import FileResponse
 from src.agents.cobbie import cobbie
 from src.config import TEST_IFC_PATH, DIRECTORY_IFC_MODELS_PATH
 from src.db.query import get_ifc_model, get_ifc_models
-from src.gltf.convert import build_all, glb_path_for
+from src.gltf.convert import build_all, glb_path_for, glb_path_from_ifc
+from src.gltf.highlight import resolve_highlight_guids
 from src.util.get_tools import get_tools
 
 # --------------------------------------------------------------------------
@@ -89,6 +93,43 @@ def get_cached_ifc(path: str):
         model = ifcopenshell.open(path)
         _MODEL_CACHE[path] = model
     return model
+
+
+def resolve_drawable_highlights(guids: list[str], model_path: str) -> list[str]:
+    """Map agent-emitted highlight GUIDs to GlobalIds the Unity client can
+    actually draw (geometry-bearing glTF nodes), expanding geometry-less
+    assembly containers to their geometry leaves. Best-effort: any failure
+    returns the original list so a resolver bug never silently drops a highlight
+    the client would otherwise have shown. Runs on the agent's worker thread, so
+    the cached ifcopenshell model is accessed single-threaded."""
+    if not guids:
+        return guids
+    try:
+        model = get_cached_ifc(model_path)
+        return resolve_highlight_guids(model, guids, glb_path_from_ifc(model_path))
+    except Exception as e:  # noqa: BLE001 - never let highlight resolution break the run
+        print(f"[server] highlight resolution failed: {e}", file=sys.stderr, flush=True)
+        return guids
+
+
+def log_highlight(f, original: list[str], resolved: list[str]) -> None:
+    """Transcript line for a highlight, showing the original -> drawable mapping
+    so 'emitted N, drew M' bugs are diagnosable at a glance."""
+    if f is None:
+        return
+    if resolved == original:
+        f.write(f"\n[highlight] {len(resolved)} object(s): {', '.join(resolved)}\n")
+    elif resolved:
+        f.write(
+            f"\n[highlight] {len(original)} emitted -> {len(resolved)} drawable: "
+            f"{', '.join(resolved)}\n"
+        )
+    else:
+        f.write(
+            f"\n[highlight] {len(original)} emitted -> 0 drawable (suppressed): "
+            f"{', '.join(original)}\n"
+        )
+    f.flush()
 
 
 # --------------------------------------------------------------------------
@@ -141,9 +182,7 @@ def log_event(f, ev: dict):
         ex = ev.get("exec_seconds")
         suffix = f"  (exec {ex}s)" if ex is not None else ""
         f.write(f"\n[result of iteration {ev.get('iteration')}]{suffix}\n{ev.get('result', '')}\n")
-    elif t == "highlight":
-        guids = ev.get("guids") or []
-        f.write(f"\n[highlight] {len(guids)} object(s): {', '.join(guids)}\n")
+    # "highlight" events are logged via log_highlight (original -> drawable);
     # "timing" events are folded into the end-of-query TIMING SUMMARY block.
     f.flush()
 
@@ -443,12 +482,25 @@ async def ws_endpoint(ws: WebSocket):
             ttft_holder: dict = {"t": None}
             agent_timing: dict = {}
 
-            def on_event(ev, _loop=loop, _q=event_q, _f=log_f):
+            def on_event(ev, _loop=loop, _q=event_q, _f=log_f, _mp=model_path):
                 etype = ev.get("type")
                 if etype == "iteration" and ttft_holder["t"] is None:
                     ttft_holder["t"] = time.time() - t_start
                 elif etype == "timing":
                     agent_timing.update(ev)
+                elif etype == "highlight":
+                    # Map the agent's GUIDs to ones Unity can actually draw
+                    # (expanding geometry-less containers to their geometry
+                    # leaves) before it hits the wire. The drawable set comes
+                    # from the built .glb, so it matches what the client resolves.
+                    original = ev.get("guids") or []
+                    resolved = resolve_drawable_highlights(original, _mp)
+                    log_highlight(_f, original, resolved)
+                    if not resolved:  # nothing drawable -> contract says don't emit
+                        return
+                    ev = {**ev, "guids": resolved}
+                    _loop.call_soon_threadsafe(_q.put_nowait, ev)
+                    return
                 log_event(_f, ev)                       # full transcript (worker thread)
                 _loop.call_soon_threadsafe(_q.put_nowait, ev)  # stream to socket
 
