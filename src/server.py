@@ -78,20 +78,43 @@ class ServerState:
 
 STATE = ServerState()
 
-# Opened IFC files, keyed by resolved path. ifcopenshell.file is not safe for
-# concurrent access, so _AGENT_LOCK serializes agent runs while caching is on.
-# Fine for single-user research; revisit (per-model locks / per-request copies)
-# before serving multiple concurrent users.
+# ifcopenshell.file is not safe for concurrent access, so each opened instance
+# is touched single-threaded under a lock. We keep TWO instances per model so a
+# long-running agent query never blocks the viewer's metadata reads:
+#   - _MODEL_CACHE / _AGENT_LOCK: the instance the agent run uses. The lock is
+#     held for the whole run, so it also serializes agent runs (one at a time).
+#   - _READ_MODEL_CACHE / _READ_LOCK: a separate read-only instance for the
+#     /elements and /element endpoints. Reads are ms, so serializing them on
+#     their own lock is fine, and they proceed while a query holds _AGENT_LOCK.
+# Separate ifcopenshell.open() objects share no mutable state, so the two run
+# concurrently safely. Cost: ~double the per-model memory.
+# Fine for single-user research; revisit (instance pool + semaphore) for truly
+# concurrent agent runs — see the MLflow run-stack caveat first.
 _MODEL_CACHE: dict = {}
 _AGENT_LOCK = threading.Lock()
+_READ_MODEL_CACHE: dict = {}
+_READ_LOCK = threading.Lock()
 
 
 def get_cached_ifc(path: str):
+    """The agent's model instance. Callers hold _AGENT_LOCK."""
     model = _MODEL_CACHE.get(path)
     if model is None:
         import ifcopenshell  # already a dependency; imported lazily
         model = ifcopenshell.open(path)
         _MODEL_CACHE[path] = model
+    return model
+
+
+def get_read_ifc(path: str):
+    """The metadata endpoints' read-only model instance, separate from the
+    agent's so /element and /elements never block on (or share state with) a
+    running query. Callers hold _READ_LOCK."""
+    model = _READ_MODEL_CACHE.get(path)
+    if model is None:
+        import ifcopenshell
+        model = ifcopenshell.open(path)
+        _READ_MODEL_CACHE[path] = model
     return model
 
 
@@ -260,13 +283,9 @@ async def list_elements(
         raise HTTPException(status_code=404, detail=str(e))
 
     def work():
-        # Touch the (possibly shared) cached file under the agent lock.
-        with _AGENT_LOCK:
-            if STATE.cache_models:
-                model = get_cached_ifc(path)
-            else:
-                import ifcopenshell
-                model = ifcopenshell.open(path)
+        # Read-only instance under _READ_LOCK: never blocks on a running query.
+        with _READ_LOCK:
+            model = get_read_ifc(path)
             try:
                 elems = model.by_type(ifc_class)  # includes subclasses
             except RuntimeError as e:
@@ -305,13 +324,9 @@ async def get_element(
     def work():
         import ifcopenshell.util.element as ue
 
-        # Touch the (possibly shared) cached file under the agent lock.
-        with _AGENT_LOCK:
-            if STATE.cache_models:
-                model = get_cached_ifc(path)
-            else:
-                import ifcopenshell
-                model = ifcopenshell.open(path)
+        # Read-only instance under _READ_LOCK: never blocks on a running query.
+        with _READ_LOCK:
+            model = get_read_ifc(path)
             try:
                 el = model.by_guid(guid)
             except RuntimeError:
