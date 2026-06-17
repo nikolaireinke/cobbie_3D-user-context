@@ -70,7 +70,7 @@ class ServerState:
     tools: dict = {}
     default_model_path: str = TEST_IFC_PATH
     client: str = "Claude_Sonnet_4_6"
-    max_iterations: int = 5
+    max_iterations: int = 8
     add_code_prefix: bool = True  # binds path_ifc_model in the per-iteration prefix
     cache_models: bool = True     # keep opened ifcopenshell.file objects across queries
     max_concurrency: int = 2      # how many agent queries may run at once
@@ -708,7 +708,7 @@ def main():
     parser.add_argument("--client", default="Claude_Sonnet_4_6", help="BAML primary client")
     parser.add_argument("--tools", nargs="+", default=["initial"],
                         choices=["initial", "created", "manual"])
-    parser.add_argument("--max-iterations", type=int, default=5)
+    parser.add_argument("--max-iterations", type=int, default=8)
     parser.add_argument("--max-concurrency", type=int, default=2,
                         help="How many agent queries may run at once")
     parser.add_argument("--parent-pid", type=int, default=None)
