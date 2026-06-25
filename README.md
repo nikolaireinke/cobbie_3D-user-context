@@ -164,6 +164,54 @@ uv run scripts/analyze_evaluation_runs.py --run-ids <run-id>
 uv run streamlit run scripts/eval_analysis_app.py
 ```
 
+## Running the Server
+
+For interactive use, `src/server.py` serves the Cobbie agent to a frontend (the Unity client, or an Android VR headset over the LAN) via a WebSocket query channel plus HTTP endpoints for model geometry and metadata. Unlike training and evaluation, the server uses a **local MLflow file store** (`mlruns/`), so the MLflow server above is **not** required.
+
+> All commands need `ROOT_PATH` set to the repository root -- prefix them with `ROOT_PATH=$(pwd)` as shown.
+
+### Control panel (recommended)
+
+A small Streamlit panel to configure, start/stop, and watch the server -- no flags to remember:
+
+```bash
+ROOT_PATH=$(pwd) uv run streamlit run scripts/server_control_app.py
+```
+
+Choose the client, port, and tools, click **Start**, and follow the live log. The panel also prints the exact `ws://…` / `http://…` endpoints a networked frontend should target and offers a one-click `/health` check. The server keeps running if you close the browser tab; it shuts down when you quit the Streamlit process.
+
+### From the terminal
+
+```bash
+ROOT_PATH=$(pwd) uv run python -m src.server \
+  --host 0.0.0.0 --port 8000 --client Claude_Haiku_4_5 --create-gltf
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--host` | `127.0.0.1` | Bind address. Use `0.0.0.0` to accept connections from other devices on the LAN. |
+| `--port` | `8000` | Port to serve on (`0` = OS-chosen, printed in the `READY` line). |
+| `--client` | `Claude_Sonnet_4_6` | BAML client (see `src/baml/baml_src/clients.baml`). |
+| `--tools` | `initial` | Tool directories to load: `initial`, `created`, `manual` (space-separated). |
+| `--max-iterations` | `8` | Max agent reasoning iterations per query. |
+| `--max-concurrency` | `2` | How many queries may run at once. |
+| `--create-gltf` | off | (Re)build `.glb` geometry for registered models before serving (needed for `/model-gltf`). |
+| `--model` | `duplex/arc.ifc` | Default IFC file for queries that don't specify a `model_id`. |
+
+### Connecting a networked / VR frontend
+
+Start with `--host 0.0.0.0` and a fixed `--port`, then point the device at the host's LAN IP:
+
+| Purpose | Endpoint |
+|---|---|
+| WebSocket queries | `ws://<host-lan-ip>:<port>/ws` |
+| Model catalogue | `http://<host-lan-ip>:<port>/models` |
+| Model geometry (glTF) | `http://<host-lan-ip>:<port>/model-gltf?model_id=<id>` |
+| Element metadata | `http://<host-lan-ip>:<port>/element?guid=<guid>&model_id=<id>` |
+| Health check | `http://<host-lan-ip>:<port>/health` |
+
+The device and host must be on the same subnet, and the host firewall must allow inbound connections to Python. Select models by `model_id` (from `/models`); `model_path` is resolved on the server and is meaningful only for same-machine use.
+
 ## Supported LLM Providers
 
 The system supports multiple LLM providers via BAML client definitions:
