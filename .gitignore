@@ -42,6 +42,7 @@ src/bim_models
 src.db/*.txt
 src.db/*.csv
 src/db/bim_models
+src/db/gltf_models/
 src/db/logs/
 pyrightconfig.json
 .mlflow/
@@ -63,3 +64,5 @@ src/db/Solibri-BIM-F.zip
 /.pi/workflow
 /src/db/chroma_docs/
 /.fastembed_cache
+/query_logs
+/mlruns

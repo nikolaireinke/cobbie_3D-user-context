@@ -16,6 +16,8 @@ class CodeAction {
 class FinalAnswer {
   thoughts string @description("Summary of findings")
   answer string @description("Final answer to user's question")
+  highlight_guids string[]? @description("GlobalIds of the elements your answer is about / that you tell the user you highlighted. The viewer highlights EXACTLY these — populate this field (do not just print them) whenever your answer identifies specific elements (e.g. 'highlight all stairs', 'every column like this one'). Use only GlobalIds you actually observed in execution results; invented or invalid ids are dropped. For a large programmatic set you would rather not inline here, you may instead assign a `highlight_guids` list in a code block; both are honoured. Leave empty when your answer highlights nothing.")
+  highlight_selection bool? @description("Set true when your answer is ABOUT the currently selected element(s) — questions phrased 'this'/'these' (e.g. 'what is this?', 'are these on the same floor?') — so the viewer re-highlights them (the user may have moved since selecting). Leave false/unset for general questions where the selection is incidental, or when you populate highlight_guids for a computed set.")
 }
 
 // Tool creation result

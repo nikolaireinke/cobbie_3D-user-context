@@ -5,7 +5,7 @@ Functional implementation using the BAML library and the CodeAct architecture.
 
 import time
 from contextlib import nullcontext
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import mlflow
 from baml_py import baml_py
@@ -14,10 +14,100 @@ from loguru import logger
 
 from src.baml.baml_client.types import CodeAction, FinalAnswer
 from src.schemas.agent_error import AgentError, CobbiResult
-from src.util.code_act_inner_loop import _code_act_iter, _execute_code_action
+from src.tools.initial.query_ifcopenshell_documentation import docs_backend_available
+from src.util.code_act_inner_loop import _code_act_iter, _execute_code_action, _safe_emit
 from src.util.extract_raw_prompt import extract_raw_prompt
 from src.util.generate_tools_docs import generate_tools_docs
 from src.util.python_executor import setup_interpreter
+
+
+def _compose_briefing(
+    question: str,
+    user_context: Optional[Dict] = None,
+    ifc_model: Optional[Any] = None,
+) -> str:
+    """Tell the LLM about runtime objects injected into its namespace. Returns
+    the question unchanged when there's nothing to brief (i.e. the eval path)."""
+    lines = []
+    if ifc_model is not None:
+        lines.append(
+            "An opened IFC model is already in your namespace as `model` "
+            "(an ifcopenshell.file). Use it directly; do NOT call ifcopenshell.open()."
+        )
+    if user_context:
+        sel = user_context.get("selection") or []
+        view = user_context.get("objects_in_view") or []
+        pose = user_context.get("user_pose") or {}
+        lines.append(
+            "Live context from the 3D viewer is available as variables: `selection` "
+            "(list of IFC GlobalId strings the user selected), `objects_in_view` (list "
+            "of dicts for objects in the view cone), `user_pose` (dict: user position/"
+            "orientation in IFC coordinates), and the full `user_context` dict. Resolve "
+            "a GlobalId to an entity with model.by_guid(<id>). Use these to answer "
+            "deictic references like 'this', 'the selection', or 'what I'm looking at'."
+        )
+        lines.append(
+            f"Right now: selection={len(sel)} element(s), objects_in_view={len(view)}, "
+            f"user_pose keys={sorted(pose.keys()) if isinstance(pose, dict) else 'n/a'}."
+        )
+    if not lines:
+        return question
+    briefing = "RUNTIME CONTEXT:\n" + "\n".join(f"- {ln}" for ln in lines)
+    return f"{briefing}\n\nQUESTION:\n{question}"
+
+
+def _extract_highlights(
+    interpreter: Any,
+    answer_guids: Optional[list[str]] = None,
+    highlight_selection: bool = False,
+) -> list[str]:
+    """GlobalIds the viewer should highlight for this answer.
+
+    Deliberate agent intent only, never a blind fallback. Two computed-set
+    channels, unioned (both are explicit intent):
+    - GlobalIds the agent returns in its FinalAnswer `highlight_guids` field
+      (the natural channel — produced in the same breath as the answer text), and
+    - a `highlight_guids` list the agent assigns in its code (for large
+      programmatic sets it would rather not inline in the answer).
+    Flag-gated fallback, only when both of the above are empty: the current
+    `selection`, but ONLY when the agent set `highlight_selection` on its
+    FinalAnswer (its answer is about the selected element[s]) — an incidental
+    selection on a general question must not trigger highlights.
+    Each id is validated against the opened model (`model.by_guid`) so
+    hallucinated/malformed ids are dropped. Order-preserving dedupe, capped.
+    Best-effort: callers wrap this so it can never break the agent loop.
+    """
+    ns = getattr(interpreter, "locals", {}) or {}
+
+    guids = [g for g in (answer_guids or []) if isinstance(g, str)]
+
+    raw = ns.get("highlight_guids")
+    if isinstance(raw, (list, tuple)):
+        guids.extend(g for g in raw if isinstance(g, str))
+    elif isinstance(raw, str):
+        guids.append(raw)
+
+    if not guids and highlight_selection:  # answer is about the selection
+        guids = [g for g in (ns.get("selection") or []) if isinstance(g, str)]
+
+    model = ns.get("model")  # pre-injected opened ifc file (server path)
+    if model is not None:
+        valid = []
+        for g in guids:
+            try:
+                if model.by_guid(g) is not None:
+                    valid.append(g)
+            except Exception:
+                pass  # unknown/malformed guid -> drop
+        guids = valid
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for g in guids:
+        if g not in seen:
+            seen.add(g)
+            out.append(g)
+    return out[:500]
 
 
 def _cobbie(
@@ -27,6 +117,9 @@ def _cobbie(
     model_path: Optional[str] = None,
     add_code_prefix: bool = False,
     client: str = "GLM_4_7",
+    user_context: Optional[Dict] = None,
+    ifc_model: Optional[Any] = None,
+    on_event: Optional[Callable] = None,
     **kwargs,
 ) -> Tuple[FinalAnswer | AgentError, str, str | None]:
     """
@@ -50,14 +143,38 @@ def _cobbie(
     """
     logger.info(f"Answering question: {question[:100]}...")
 
+    # Only advertise the docs tool when its backend can actually return docs.
+    # Where the backend is unconfigured/empty, advertising it just invites
+    # wasted iterations (the call returns an "unavailable" hint), so drop it here
+    # — the prompt's docs instructions are gated on its presence and vanish too.
+    if "query_ifcopenshell_docs" in tools and not docs_backend_available():
+        tools = {n: t for n, t in tools.items() if n != "query_ifcopenshell_docs"}
+        logger.info("Docs backend unavailable — hiding query_ifcopenshell_docs from this run.")
+
     # Prepare execution context
     tools_docs = generate_tools_docs(tools)
     previous_attempts = []
 
     # Initialize counters for comprehensive metrics
     code_execution_count = 0
-    total_code_execution_time = 0
+    total_code_execution_time = 0.0
+    total_llm_time = 0.0
     llm_calls = 0
+
+    # Emit one authoritative timing summary to the streaming callback before any
+    # return path. Built from loop-side totals (not the event stream) so it
+    # includes the FinalAnswer LLM call and schema-error retries, which never
+    # produce per-iteration events. The server enriches it with model-load and
+    # wall-clock numbers only it can see.
+    def _emit_timing(iterations_done: int) -> None:
+        _safe_emit(on_event, {
+            "type": "timing",
+            "llm_s": round(total_llm_time, 3),
+            "exec_s": round(total_code_execution_time, 3),
+            "iterations": iterations_done,
+            "llm_calls": llm_calls,
+            "code_executions": code_execution_count,
+        })
 
     # Initialize the previous_attempts
     previous_attempts = ""
@@ -65,11 +182,22 @@ def _cobbie(
     # Track whether the previous iteration was a schema error (for prompt feedback)
     schema_error_on_prev_iteration = False
 
+    # Guard against a turn-1 FinalAnswer with zero code: the model cannot have
+    # OBSERVED any count, GlobalId, or value without running code, so such an
+    # answer is fabricated. We force one code pass by nudging and looping — at
+    # most ONCE, so a question that legitimately needs no code still terminates.
+    forced_code_nudge_done = False
+
     # Rendered system prompt (captured from the first successful LLM call)
     rendered_prompt: str | None = None
 
     # Create interpreter ONCE for this question (reused across all iterations)
-    interpreter = setup_interpreter(model_path, tools)
+    interpreter = setup_interpreter(
+        model_path, tools, ifc_model=ifc_model, user_context=user_context
+    )
+
+    # Prepend a runtime-context briefing for the LLM (no-op on the eval path).
+    effective_question = _compose_briefing(question, user_context, ifc_model)
 
     # Main reasoning loop
     for iteration in range(max_iterations):
@@ -97,13 +225,17 @@ def _cobbie(
                     }
                 )
 
+                llm_start = time.time()
                 result = _code_act_iter(
-                    user_input=question,
+                    user_input=effective_question,
                     available_tools=tools_docs,
                     previous_attempts=previous_attempts,
                     model_path=model_path,
                     **kwargs,
                 )
+                # Accumulate before branching so schema-error retries count too.
+                iter_llm_seconds = time.time() - llm_start
+                total_llm_time += iter_llm_seconds
 
                 if isinstance(result, AgentError):
                     if not schema_error_on_prev_iteration:
@@ -151,6 +283,7 @@ Please retry with the correct format.
                         )
                         llm_span.set_status("ERROR")
                         iteration_span.set_status("ERROR")
+                        _emit_timing(iteration + 1)
                         return result, previous_attempts, rendered_prompt
 
                 # Reset on success
@@ -217,6 +350,27 @@ Please retry with the correct format.
 
             # Handle union type flow control
             if isinstance(result, FinalAnswer):
+                # Reject a FinalAnswer that ran no code: its counts/GlobalIds/
+                # values cannot have been observed, so they are fabricated. Nudge
+                # once to force a grounding code pass, then let it answer.
+                if code_execution_count == 0 and not forced_code_nudge_done:
+                    forced_code_nudge_done = True
+                    previous_attempts += f"""
+--- Iteration {iteration + 1} ---
+GROUNDING ERROR: You returned a FinalAnswer without running any code, so every
+count, GlobalId, dimension, or value in it is unverified — you cannot know these
+without inspecting the model. Do NOT answer yet. Choose CodeAction and inspect
+the model (e.g. by_type / by_guid, then print the GlobalIds and counts you need).
+Only assert facts — and only put GlobalIds in highlight_guids — that appear in the
+execution output you observe.
+"""
+                    logger.warning(
+                        f"FinalAnswer with zero code on iteration {iteration + 1}; "
+                        f"injecting grounding nudge and forcing a code pass."
+                    )
+                    iteration_span.set_status("ERROR")
+                    continue  # next iteration of the Cobbie loop
+
                 logger.info(
                     f"Number of iterations: {iteration + 1}"
                 )
@@ -244,10 +398,25 @@ Please retry with the correct format.
                 )
                 iteration_span.set_status("OK")
 
+                # Stream the agent's chosen highlight set (GlobalIds the viewer
+                # should highlight). Best-effort — never let it break the loop.
+                try:
+                    highlight_guids = _extract_highlights(
+                        interpreter,
+                        answer_guids=getattr(result, "highlight_guids", None),
+                        highlight_selection=bool(getattr(result, "highlight_selection", False)),
+                    )
+                    if highlight_guids:
+                        _safe_emit(on_event, {"type": "highlight", "guids": highlight_guids})
+                except Exception:
+                    pass
+
+                _emit_timing(iteration + 1)
                 return result, previous_attempts, rendered_prompt
 
             elif isinstance(result, CodeAction):
                 # Update the previous results
+                exec_start = time.time()
                 current_attempt = _execute_code_action(
                     code_action=result,
                     iteration=iteration,
@@ -255,8 +424,12 @@ Please retry with the correct format.
                     model_path=model_path,
                     add_code_prefix=add_code_prefix,
                     interpreter=interpreter,
+                    on_event=on_event,
+                    llm_seconds=iter_llm_seconds,
                 )
-                previous_attempts += f"/n{current_attempt}/n"
+                total_code_execution_time += time.time() - exec_start
+                code_execution_count += 1
+                previous_attempts += f"\n{current_attempt}\n"
 
                 iteration_span.set_attributes(
                     {
@@ -342,6 +515,7 @@ Please retry with the correct format.
         )
         final_span.set_status("OK")
 
+        _emit_timing(max_iterations)
         return final_answer, previous_attempts, rendered_prompt
 
 
@@ -353,6 +527,9 @@ def cobbie(
     add_code_prefix: bool = False,
     client: str = "GLM_4_7",
     mlflow_run_id: Optional[str] = None,
+    user_context: Optional[Dict] = None,
+    ifc_model: Optional[Any] = None,
+    on_event: Optional[Callable] = None,
     **kwargs,
 ) -> CobbiResult:
     """
@@ -432,6 +609,9 @@ def cobbie(
                 model_path=model_path,
                 add_code_prefix=add_code_prefix,
                 client=client,
+                user_context=user_context,
+                ifc_model=ifc_model,
+                on_event=on_event,
                 **kwargs,
             )
             execution_time = time.time() - start_time

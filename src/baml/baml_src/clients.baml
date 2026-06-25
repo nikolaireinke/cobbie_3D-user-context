@@ -117,6 +117,38 @@ client<llm> Claude_Sonnet_4_6 {
     api_key env.ANTHROPIC_API_KEY
     max_tokens 8192
     temperature 0.1
+    // Forward cache_control role metadata (see cobbie.baml) so the static
+    // prompt prefix is cached across a question's iterations.
+    allowed_role_metadata ["cache_control"]
+    headers {
+      "anthropic-beta" "prompt-caching-2024-07-31"
+    }
+    http {
+      connect_timeout_ms 30000
+      request_timeout_ms 180000
+    }
+  }
+}
+
+// Anthropic Claude Haiku 4.5 (fast, low-cost variant)
+// NOTE: the client name "Claude_Haiku_4_5" is matched by string in
+// cobbie.baml (ctx.client.name gate that prefills the assistant turn so
+// Haiku returns structured output instead of tool-call XML). If you rename
+// this client, update that gate too or Haiku will silently break.
+client<llm> Claude_Haiku_4_5 {
+  provider anthropic
+  retry_policy Exponential
+  options {
+    model "claude-haiku-4-5"
+    api_key env.ANTHROPIC_API_KEY
+    max_tokens 8192
+    temperature 0.1
+    // Forward cache_control role metadata (see cobbie.baml) so the static
+    // prompt prefix is cached across a question's iterations.
+    allowed_role_metadata ["cache_control"]
+    headers {
+      "anthropic-beta" "prompt-caching-2024-07-31"
+    }
     http {
       connect_timeout_ms 30000
       request_timeout_ms 180000

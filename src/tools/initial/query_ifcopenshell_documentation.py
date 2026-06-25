@@ -1,5 +1,6 @@
 import os
 import time
+from functools import lru_cache
 from typing import Literal
 
 import mlflow
@@ -10,6 +11,28 @@ from src.util.python_executor import count_tokens
 
 load_dotenv(find_dotenv())
 CONTEXT7_API_KEY = os.getenv("CONTEXT7_API_KEY")
+
+
+@lru_cache(maxsize=1)
+def docs_backend_available() -> bool:
+    """Whether the configured docs backend can actually return documentation.
+
+    This is a deploy-time constant (keyed off DOC_BACKEND, the Context7 API key,
+    and whether the local index has content), so it is cached for the process.
+    Callers use it to decide whether to advertise ``query_ifcopenshell_docs`` to
+    the agent at all — on deployments where the backend is unconfigured or empty,
+    advertising the tool only invites wasted iterations.
+    """
+    backend = os.getenv("DOC_BACKEND", "custom")
+    if backend == "context7":
+        return bool(os.getenv("CONTEXT7_API_KEY"))
+    # custom backend: usable only if the local vector index has content
+    try:
+        from src.docs_indexer.storage import DEFAULT_DB_PATH, DocVectorStore
+
+        return DocVectorStore(DEFAULT_DB_PATH).count_chunks() > 0
+    except Exception:
+        return False
 
 def _query_context7(query: str) -> str:
     """Query IfcOpenShell docs using Context7 API."""
@@ -63,11 +86,37 @@ def _query_context7(query: str) -> str:
         return f"Failed to query Context7 API: {str(e)}"
 
 
-def _query_custom(query: str) -> str:
-    """Query IfcOpenShell docs using local vector store."""
-    from src.docs_indexer.retriever import query_docs
+_DOCS_UNAVAILABLE_HINT = (
+    " Proceed using your own ifcopenshell knowledge and verify the result in code."
+)
 
-    return query_docs(query, top_k=5)
+
+def _query_custom(query: str) -> str:
+    """Query IfcOpenShell docs using the local vector store.
+
+    Degrades gracefully: the local backend depends on an embedding model and a
+    pre-built vector index, neither of which is guaranteed to exist on a given
+    machine. On any failure (embedding model not pulled, index empty/absent,
+    etc.) we return a clear message instead of raising, so a failed lookup
+    never aborts the agent's iteration.
+    """
+    try:
+        from src.docs_indexer.retriever import query_docs
+
+        result = query_docs(query, top_k=5)
+    except Exception as e:
+        return (
+            f"IfcOpenShell documentation is currently unavailable ({type(e).__name__}: {e})."
+            + _DOCS_UNAVAILABLE_HINT
+        )
+
+    if not result.strip() or result.strip() == "No relevant documentation found.":
+        return (
+            "No IfcOpenShell documentation matched this query "
+            "(the local docs index may be empty)."
+            + _DOCS_UNAVAILABLE_HINT
+        )
+    return result
 
 
 def query_ifcopenshell_docs(query: str) -> None:
@@ -76,6 +125,11 @@ def query_ifcopenshell_docs(query: str) -> None:
 
     Uses either Context7 API or local vector store depending on DOC_BACKEND.
     Results are printed to stdout.
+
+    Note: this tool may be unavailable on some deployments (no docs backend
+    configured or an empty index). If it returns an "unavailable" or "no
+    documentation found" message, proceed using your own ifcopenshell knowledge
+    and verify the result in code — do not retry the query.
 
     Args:
         query: The topic or query to focus the documentation on (e.g., "finds all entities of type `IfcWall`", "element bounding box", "clash detection", etc.)
