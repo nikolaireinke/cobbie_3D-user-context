@@ -8,9 +8,15 @@ Launch with:  uv run streamlit run scripts/server_control_app.py
 
 The panel only *drives* `src/server.py`; it spawns it as a subprocess and
 supervises it. Behaviour notes:
-  - Closing the browser *tab* leaves the server running (the supervisor is a
-    process-wide singleton that survives Streamlit reruns/sessions). Stop is
-    always explicit via the Stop button.
+  - Closing the browser *tab* stops the server too, while the "Stop server when
+    I close this tab" toggle is on (the default): a supervisor watchdog polls
+    Streamlit's active-session count and shuts the server down once no tab has
+    been connected for TAB_CLOSE_GRACE_SECONDS. The grace window lets a page
+    refresh (which briefly disconnects, then reconnects) pass without a kill,
+    and a backgrounded tab keeps its websocket open so it never false-fires. A
+    `beforeunload` confirm dialog guards against closing the tab by accident.
+    Untick the toggle to keep the server running after the tab closes (handy to
+    keep the headset served while you step away from the laptop).
   - Killing the *Streamlit process* (Ctrl-C in its terminal) stops the server
     too: it is spawned with `--parent-pid <streamlit pid>`, and the server's
     own watchdog self-exits when that parent dies — so it never orphans and
@@ -23,12 +29,14 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 from collections import deque
 from contextlib import suppress
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 # Repo root, derived from this file (scripts/ is one level under root) so the
 # panel works regardless of the cwd it was launched from.
@@ -37,6 +45,10 @@ CLIENTS_BAML = REPO_ROOT / "src" / "baml" / "baml_src" / "clients.baml"
 DEFAULT_MODEL = str(REPO_ROOT / "src" / "db" / "bim_models" / "duplex" / "arc.ifc")
 TOOL_CHOICES = ["initial", "created", "manual"]
 FALLBACK_CLIENTS = ["Claude_Haiku_4_5", "Claude_Sonnet_4_6"]
+# How long the server keeps running after the last browser tab disconnects,
+# before the tab-close killswitch stops it. Wide enough to absorb a page refresh
+# (a brief disconnect + reconnect) without a false kill.
+TAB_CLOSE_GRACE_SECONDS = 15.0
 
 
 # --------------------------------------------------------------------------
@@ -57,6 +69,12 @@ class ServerSupervisor:
         self.port: int | None = None
         self._reader: threading.Thread | None = None
         self._lock = threading.Lock()
+        # Tab-close killswitch: stop the server once no browser tab has been
+        # connected for grace_seconds. Read live by the watchdog, so toggling
+        # takes effect even while the server is running.
+        self.kill_on_tab_close: bool = True
+        self.grace_seconds: float = TAB_CLOSE_GRACE_SECONDS
+        self._killswitch_warned: bool = False
 
     def is_running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -72,6 +90,7 @@ class ServerSupervisor:
             self.log.clear()
             self.ready_port = None
             self.host, self.port = host, port
+            self._killswitch_warned = False
             self.log.append(f"$ {' '.join(cmd)}\n")
             self.proc = subprocess.Popen(
                 cmd, cwd=cwd, env=env,
@@ -82,6 +101,9 @@ class ServerSupervisor:
                 target=self._read_loop, args=(self.proc,), daemon=True, name="server-log-reader"
             )
             self._reader.start()
+            threading.Thread(
+                target=self._kill_watch, args=(self.proc,), daemon=True, name="tab-killswitch"
+            ).start()
 
     def stop(self) -> None:
         with self._lock:
@@ -109,6 +131,38 @@ class ServerSupervisor:
                 with suppress(ValueError, IndexError):
                     self.ready_port = int(stripped.split()[1])
         # readline returned "" -> EOF -> the process has exited.
+
+    def _kill_watch(self, proc: subprocess.Popen[str]) -> None:
+        """Tab-close killswitch. Stops the server once no browser tab has been
+        connected for grace_seconds, while kill_on_tab_close is set. Tied to one
+        spawned `proc`: returns as soon as that process is replaced or gone, so a
+        fresh start() always owns its own watchdog."""
+        zero_since: float | None = None
+        while True:
+            time.sleep(1.0)
+            if self.proc is not proc or proc.poll() is not None:
+                return  # this server was stopped or replaced by a new start()
+            if not self.kill_on_tab_close:
+                zero_since = None
+                continue
+            n = active_session_count()
+            if n is None:
+                if not self._killswitch_warned:
+                    self._killswitch_warned = True
+                    self.log.append(
+                        "\n[control] killswitch off: can't read Streamlit session count.\n"
+                    )
+                continue
+            if n > 0:
+                zero_since = None
+                continue
+            # No tab connected. Start (or keep) the grace countdown.
+            if zero_since is None:
+                zero_since = time.monotonic()
+            elif time.monotonic() - zero_since >= self.grace_seconds:
+                self.log.append("\n[control] tab closed — stopping server (killswitch).\n")
+                self.stop()
+                return
 
 
 @st.cache_resource
@@ -154,6 +208,52 @@ def check_health(url: str, timeout: float = 2.0) -> tuple[int | None, str]:
             return r.status, r.read().decode("utf-8", "replace")[:200]
     except Exception as e:  # noqa: BLE001 - any failure is just a red light
         return None, str(e)
+
+
+def active_session_count() -> int | None:
+    """Number of *connected* Streamlit sessions (browser tabs), read from the
+    runtime. A closed tab drops out immediately; a refresh reconnects within a
+    second or two; a backgrounded tab stays connected. Returns None if the count
+    can't be read — in which case the killswitch holds off rather than guessing."""
+    try:
+        from streamlit.runtime import get_instance
+
+        return get_instance()._session_mgr.num_active_sessions()
+    except Exception:  # noqa: BLE001 - any failure just disables the killswitch
+        return None
+
+
+def arm_beforeunload(armed: bool) -> None:
+    """(Un)install a `beforeunload` confirm dialog on the page so the tab can't
+    be closed by accident while doing so would stop the server. Always renders
+    (idempotently add/remove) so disarming reliably tears the listener down — a
+    one-shot conditional render would orphan it on the parent window."""
+    flag = "true" if armed else "false"
+    components.html(
+        f"""
+        <script>
+        (function() {{
+          var ARMED = {flag};
+          function arm(w) {{
+            try {{
+              if (w.__cobbieBUL) {{
+                w.removeEventListener('beforeunload', w.__cobbieBUL);
+                w.__cobbieBUL = null;
+              }}
+              if (ARMED) {{
+                var h = function(e) {{ e.preventDefault(); e.returnValue = ''; return ''; }};
+                w.__cobbieBUL = h;
+                w.addEventListener('beforeunload', h);
+              }}
+            }} catch (e) {{}}
+          }}
+          arm(window);
+          try {{ if (window.parent && window.parent !== window) arm(window.parent); }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def build_command(
@@ -247,13 +347,32 @@ with st.sidebar:
         no_cache_models = st.checkbox("Re-open IFC per query (--no-cache-models)", value=False)
         mlflow_dir = st.text_input("MLflow dir (--mlflow-dir)", "", help="Blank = default <root>/mlruns.")
 
+    st.divider()
+    kill_on_close = st.toggle(
+        "Stop server when I close this tab", value=True,
+        help=(
+            f"On: closing this tab stops the server ~{int(TAB_CLOSE_GRACE_SECONDS)}s later "
+            "(a refresh is safe; you'll get a confirm prompt first). Off: the server keeps "
+            "running after the tab closes — keep the headset served while you step away."
+        ),
+    )
+
+# Apply the killswitch settings live, so toggling takes effect even while running.
+sup.kill_on_tab_close = kill_on_close
+sup.grace_seconds = TAB_CLOSE_GRACE_SECONDS
+
 st.title("Cobbie Server Control")
 st.caption(
-    "Configure and run the Cobbie WebSocket server. The browser tab is a remote control — closing "
-    "it leaves the server running; stop it explicitly here, or quit this Streamlit process to shut it down."
+    "Configure and run the Cobbie WebSocket server. By default, closing this tab stops the server "
+    "(after a short grace window, with a confirm prompt) — untick the sidebar toggle to leave it "
+    "running for the headset. You can also stop it explicitly here, or quit this Streamlit process."
 )
 
 running = sup.is_running()
+# Guard the tab against accidental close only while doing so would actually stop
+# the server (server up + killswitch armed). Renders every run so Stop/untoggle
+# tears the prompt back down.
+arm_beforeunload(running and kill_on_close)
 c_start, c_stop, c_health = st.columns(3)
 start_clicked = c_start.button("▶ Start", type="primary", disabled=running, use_container_width=True)
 stop_clicked = c_stop.button("■ Stop", disabled=not running, use_container_width=True)
